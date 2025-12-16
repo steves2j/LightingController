@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Create LED Driver Integration",
+        "description": "Set up the LED driver integration. Detailed configuration is handled in the custom panel.",
+        "data": {
+          "name": "Integration name"
+        }
+      }
+    }
+  }
+}

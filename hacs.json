@@ -1,0 +1,7 @@
+{
+  "name": "LED Driver Controller",
+  "content_in_root": false,
+  "render_readme": true,
+  "domains": ["s2j_led_driver"],
+  "country": "ALL"
+}

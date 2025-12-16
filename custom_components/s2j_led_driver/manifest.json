@@ -1,0 +1,20 @@
+{
+  "domain": "s2j_led_driver",
+  "name": "LED Driver Controller",
+  "version": "0.2.0",
+  "documentation": "https://github.com/steves2j/LightingController",
+  "issue_tracker": "https://github.com/steves2j/LightingController/issues",
+  "requirements": [
+    "pyserial>=3.5",
+    "pyserial-asyncio>=0.6"
+  ],
+  "codeowners": [
+    "steve@s2j.io"
+  ],
+  "config_flow": true,
+  "iot_class": "local_push",
+  "integration_type": "hub",
+  "loggers": [
+    "custom_components.s2j_led_driver"
+  ]
+}
