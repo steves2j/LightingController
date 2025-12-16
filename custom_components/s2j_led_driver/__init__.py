@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from pathlib import Path
 import logging
 from typing import Any
 
@@ -160,13 +161,20 @@ class LedDriverMetricsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
 
 def _register_panel(hass: HomeAssistant) -> None:
+    static_root = Path(__file__).parent / "www"
+    hass.http.register_static_path(
+        "/s2j_led_driver_static",
+        str(static_root),
+        cache_headers=True,
+    )
+
     frontend.async_register_built_in_panel(
         hass,
         component_name="iframe",
         sidebar_title="LED Driver",
         sidebar_icon="mdi:led-strip-variant",
         frontend_url_path="led-driver",
-        config={"url": "/local/led_driver_panel/index.html"},
+        config={"url": "/s2j_led_driver_static/led_driver_panel/index.html"},
     )
 
 
