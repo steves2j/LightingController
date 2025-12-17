@@ -58,7 +58,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: LedDriverConfigEntry) ->
         domain_data["_http_registered"] = True
 
     if not domain_data.get("_panel_registered"):
-        _register_panel(hass)
+        await _register_panel(hass)
         domain_data["_panel_registered"] = True
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -161,21 +161,38 @@ class LedDriverMetricsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._registry.async_remove_listener(self._listener)
 
 
-def _register_panel(hass: HomeAssistant) -> None:
+async def _register_panel(hass: HomeAssistant) -> None:
     static_root = Path(__file__).parent / "www"
+    mounted = False
     if hasattr(hass.http, "register_static_path"):
-        hass.http.register_static_path(
-            "/s2j_led_driver_static",
-            str(static_root),
-            cache_headers=True,
-        )
-    elif hasattr(hass.http, "async_register_static_paths"):
-        hass.http.async_register_static_paths(
-            [StaticPathConfig("/s2j_led_driver_static", str(static_root), cache_headers=True)]
-        )
-    else:
-        # Very old HA: fall back to aiohttp router
-        hass.http.app.router.add_static("/s2j_led_driver_static", str(static_root))
+        try:
+            hass.http.register_static_path(
+                "/s2j_led_driver_static",
+                str(static_root),
+                cache_headers=True,
+            )
+            mounted = True
+        except Exception:  # pragma: no cover - compatibility fallback
+            mounted = False
+
+    if not mounted and hasattr(hass.http, "async_register_static_paths"):
+        try:
+            await hass.http.async_register_static_paths(
+                [StaticPathConfig("/s2j_led_driver_static", str(static_root), cache_headers=True)]
+            )
+            mounted = True
+        except Exception:  # pragma: no cover - compatibility fallback
+            mounted = False
+
+    if not mounted:
+        # Final fallback: plain aiohttp static route and allowlist
+        try:
+            hass.http.app.router.add_static("/s2j_led_driver_static", str(static_root))
+            allowlist = getattr(hass.http, "allowlist_external_dirs", None)
+            if allowlist is not None and static_root not in allowlist:
+                allowlist.add(static_root)
+        except Exception:  # pragma: no cover - last resort
+            _LOGGER.warning("Failed to register static path for LED driver panel")
 
     frontend.async_register_built_in_panel(
         hass,
