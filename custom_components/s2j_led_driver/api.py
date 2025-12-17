@@ -242,6 +242,17 @@ class LedDriverRegistryView(LedDriverBaseView):
         registry = entry_data["registry"]
         return web.json_response(serialize_registry_snapshot(registry))
 
+    async def post(self, request: web.Request, entry_id: str) -> web.Response:
+        """Replace the registry with an uploaded snapshot."""
+        entry_data = self._resolve_entry(entry_id)
+        registry = entry_data["registry"]
+        payload = await request.json()
+        try:
+            await registry.async_import_snapshot(payload)
+        except ValueError as err:
+            raise web.HTTPBadRequest(text=str(err)) from err
+        return web.json_response({"status": "ok"})
+
 
 class _BaseRegistryMutationView(LedDriverBaseView):
     """Base view for registry mutations."""

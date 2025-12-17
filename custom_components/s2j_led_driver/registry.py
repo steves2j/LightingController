@@ -167,6 +167,51 @@ class LedRegistry:
         await self.async_save()
         self._async_notify()
 
+    async def async_import_snapshot(self, snapshot: dict[str, Any]) -> None:
+        """Replace the registry contents with a supplied snapshot."""
+
+        if not isinstance(snapshot, dict):
+            raise ValueError("Snapshot must be a dictionary")
+
+        def _dict_from_list(items: Any, prefix: str) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            if not isinstance(items, list):
+                return result
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                item_id = item.get("id") or _new_id(prefix)
+                item["id"] = item_id
+                result[str(item_id)] = item
+            return result
+
+        controllers = _dict_from_list(snapshot.get("controllers"), "controller")
+        drivers = _dict_from_list(snapshot.get("drivers"), "driver")
+        groups = _dict_from_list(snapshot.get("groups"), "group")
+        switches = _dict_from_list(snapshot.get("switches"), "switch")
+        buttons = _dict_from_list(snapshot.get("buttons"), "button")
+        learned_buttons = _dict_from_list(snapshot.get("learned_buttons"), "learned_button")
+
+        ssr = snapshot.get("ssr") if isinstance(snapshot.get("ssr"), dict) else {}
+        patch_panel = snapshot.get("patch_panel") if isinstance(snapshot.get("patch_panel"), dict) else {}
+
+        self._data = {
+            "controllers": controllers,
+            "drivers": drivers,
+            "groups": groups,
+            "switches": switches,
+            "buttons": buttons,
+            "learned_buttons": learned_buttons,
+            "ssr": {
+                "base_address": ssr.get("base_address", 0),
+                "entries": ssr.get("entries", {}),
+            },
+            "patch_panel": {
+                "ports": patch_panel.get("ports", {}),
+            },
+        }
+        await self.async_commit()
+
     @callback
     def async_add_listener(self, listener: RegistryListener) -> None:
         self._listeners.append(listener)
@@ -1211,7 +1256,7 @@ class LedRegistry:
 def serialize_registry_snapshot(registry: LedRegistry) -> dict[str, Any]:
     """Return a safe snapshot of registry contents for the API."""
 
-    return {
+    snapshot = {
         "controllers": deepcopy(registry.get_controllers()),
         "drivers": deepcopy(registry.get_drivers()),
         "groups": deepcopy(registry.get_groups()),
@@ -1227,3 +1272,5 @@ def serialize_registry_snapshot(registry: LedRegistry) -> dict[str, Any]:
             "ports": registry.list_patch_panel_ports(),
         },
     }
+    # serial logs intentionally omitted from export; add a dedicated export if needed
+    return snapshot

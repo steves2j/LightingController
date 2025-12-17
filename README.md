@@ -54,6 +54,15 @@ This requires a github account. If you don't have one already. Create one by vis
 ## Configuration
 - The config flow creates a single instance (one entry). Serial ports and drivers are managed through the panel.
 - The panel is served from `/s2j_led_driver_static/led_driver_panel/index.html`; the controller overview is at `/s2j_led_driver_static/controller_overview.html`.
+If you want the controller_overview to always display in the Overview, Edit your Dashboard and update to the following. To be able to do this you will need to "Tale Control" when you click on the edit icon (NOTE: Taking control will expose your inner access and can be used to circumvent security if your HA is exposed to the public).
+views:
+  - path: default_view
+    title: Home
+    type: panel
+    cards:
+      - type: iframe
+        url: /s2j_led_driver_static/controller_overview.html
+        aspect_ratio: 75%
 
 ## Development
 - Key code: `custom_components/s2j_led_driver` (logic, registry, API, entities), `www/led_driver_panel` + `www/controller_overview.html` (frontend).
