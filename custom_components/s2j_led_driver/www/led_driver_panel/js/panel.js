@@ -62,9 +62,11 @@ import {
   upsertPatchPanelPort,
   deleteLearnedButton,
   waitForHass,
+  fetchRegistry,
+  importRegistry,
 } from "./api.js";
 
-const PANEL_VERSION = "4.7"; // increment for visibility per sync request
+const PANEL_VERSION = "4.9"; // increment for visibility per sync request
 // Expose version globally for other pages (e.g., controller_overview)
 if (typeof window !== "undefined") {
   window.LED_DRIVER_PANEL_VERSION = PANEL_VERSION;
@@ -96,6 +98,9 @@ const svgPortCache = {
 let autoRefreshTimer = null;
 let refreshInFlight = false;
 let pendingRefreshOptions = null;
+const exportButton = document.getElementById("export-registry");
+const importInput = document.getElementById("import-registry");
+const importButton = document.getElementById("import-registry-button");
 
       function startAutoRefresh() {
         if (autoRefreshTimer || !AUTO_REFRESH_INTERVAL) {
@@ -114,14 +119,64 @@ let pendingRefreshOptions = null;
         }, AUTO_REFRESH_INTERVAL);
       }
 
-      function stopAutoRefresh() {
-        if (autoRefreshTimer) {
-          clearInterval(autoRefreshTimer);
-          autoRefreshTimer = null;
-        }
-      }
+function stopAutoRefresh() {
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
+}
 loadButton.addEventListener("click", () => withErrorNotice(() => refreshAll({ showStatus: true, force: true })));
-      refreshButton.addEventListener("click", () => withErrorNotice(() => refreshAll({ showStatus: true, force: true })));
+refreshButton.addEventListener("click", () => withErrorNotice(() => refreshAll({ showStatus: true, force: true })));
+
+if (exportButton) {
+  exportButton.addEventListener("click", async () => {
+    if (!state.entryId) {
+      setError("Select an integration first.");
+      return;
+    }
+    try {
+      const snapshot = await fetchRegistry(state.entryId);
+      const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `led_driver_registry_${state.entryId}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error(error);
+      setError(error.message || "Failed to export registry.");
+    }
+  });
+}
+
+if (importInput) {
+  if (importButton) {
+    importButton.addEventListener("click", () => importInput.click());
+  }
+  importInput.addEventListener("change", async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!state.entryId) {
+      setError("Select an integration first.");
+      return;
+    }
+    try {
+      const text = await file.text();
+      const snapshot = JSON.parse(text);
+      await importRegistry(state.entryId, snapshot);
+      await refreshAll({ showStatus: true, force: true });
+      setError("");
+    } catch (error) {
+      console.error(error);
+      setError(error.message || "Failed to import registry.");
+    } finally {
+      event.target.value = "";
+    }
+  });
+}
 
       entrySelect.addEventListener("change", () => {
         state.entryId = entrySelect.value || "";

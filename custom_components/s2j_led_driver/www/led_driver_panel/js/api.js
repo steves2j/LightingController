@@ -82,6 +82,14 @@ export async function apiRequest(method, path, payload) {
   return response.json();
 }
 
+export function fetchRegistry(entryId) {
+  return apiRequest("GET", `/api/s2j_led_driver/${entryId}/registry`);
+}
+
+export function importRegistry(entryId, snapshot) {
+  return apiRequest("POST", `/api/s2j_led_driver/${entryId}/registry`, snapshot);
+}
+
 export function sendGroupCommand(entryId, groupId, turnOn) {
   return apiRequest("POST", `/api/s2j_led_driver/${entryId}/command`, {
     command: "set_group",

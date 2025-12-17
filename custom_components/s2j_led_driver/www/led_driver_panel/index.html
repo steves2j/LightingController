@@ -5,7 +5,6 @@
     <title>LED Driver Control Panel</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="stylesheet" href="panel.css" />
-
   </head>
   <body>
     <h1>LED Driver Control Panel</h1>
@@ -17,10 +16,12 @@
 
     <div class="toolbar">
       <label>
-        Integration
-        <select id="entry-select"></select>
+         <select id="entry-select"></select>
       </label>
       <button id="load" class="primary">Refresh</button>
+      <button id="export-registry" class="secondary">Export</button>
+      <button id="import-registry-button" class="secondary">Import</button>
+      <input id="import-registry" type="file" accept="application/json" style="display:none;" />
       <span id="status" class="hint"></span>
     </div>
 
