@@ -66,7 +66,7 @@ import {
   importRegistry,
 } from "./api.js";
 
-const PANEL_VERSION = "4.9"; // increment for visibility per sync request
+const PANEL_VERSION = "5.5"; // increment for visibility per sync request
 // Expose version globally for other pages (e.g., controller_overview)
 if (typeof window !== "undefined") {
   window.LED_DRIVER_PANEL_VERSION = PANEL_VERSION;
@@ -101,6 +101,7 @@ let pendingRefreshOptions = null;
 const exportButton = document.getElementById("export-registry");
 const importInput = document.getElementById("import-registry");
 const importButton = document.getElementById("import-registry-button");
+const expandedSwitches = new Set();
 
       function startAutoRefresh() {
         if (autoRefreshTimer || !AUTO_REFRESH_INTERVAL) {
@@ -844,21 +845,77 @@ let pendingSwitchSelectKey = null;
 
         syncEditingSet("switches", entries);
 
+        // prune expansions for removed switches
+        const entryKeys = new Set(entries.map((entry) => getItemKey(entry)));
+        Array.from(expandedSwitches).forEach((key) => {
+          if (!entryKeys.has(key)) {
+            expandedSwitches.delete(key);
+          }
+        });
+
         if (!entries.length) {
           switchesContainer.innerHTML = '<p class="hint">No switches configured yet.</p>';
           renderButtonDiscoveries();
           return;
         }
 
-        switchesContainer.innerHTML = entries
+        const rows = entries
           .map((entry) => {
             const key = getItemKey(entry);
             const isDraft = Boolean(entry.__tempId);
-            return state.editing.switches.has(key)
-              ? renderSwitchEditor(entry, key, isDraft)
-              : renderSwitchSummary(entry, key, isDraft);
+            const buttons = getButtonsForSwitch(entry);
+            const expanded = expandedSwitches.has(key);
+            const switchValue = entry.switch ?? "";
+            const name =
+              entry.name ||
+              (Number.isFinite(Number(switchValue)) ? `Switch ${switchValue}` : String(switchValue || "Switch"));
+            const buttonCount = buttons.length || Number(entry.button_count || 0);
+            const summaryRow = `
+              <tr class="switch-row" data-key="${key}">
+                <td class="center switch-expander" data-action="toggle-switch-expand" data-key="${key}" data-draft="${isDraft}" role="button" tabindex="0">${expanded ? "−" : "+"}</td>
+                <td>${escapeHtml(name)}</td>
+                <td>${escapeHtml(String(switchValue === "" ? "—" : switchValue))}</td>
+                <td>${buttonCount}</td>
+                <td class="right">
+                  <button class="secondary" data-action="toggle-switch-edit" data-key="${key}" data-draft="${isDraft}">
+                    Edit
+                  </button>
+                  <button class="danger" data-action="delete-switch" data-key="${key}" data-draft="${isDraft}">${
+              isDraft ? "Discard" : "Delete"
+            }</button>
+                </td>
+              </tr>`;
+            let detailRow = "";
+            if (state.editing.switches.has(key)) {
+              detailRow = `<tr class="switch-detail" data-detail-key="${key}"><td colspan="5">${renderSwitchEditor(
+                entry,
+                key,
+                isDraft
+              )}</td></tr>`;
+            } else if (expanded) {
+              detailRow = `<tr class="switch-detail" data-detail-key="${key}"><td colspan="5">${renderSwitchButtonsReadonly(
+                entry,
+                buttons
+              )}</td></tr>`;
+            }
+            return summaryRow + detailRow;
           })
           .join("");
+
+        switchesContainer.innerHTML = `
+          <table class="switch-table">
+            <thead>
+              <tr>
+                <th class="center"></th>
+                <th>Name</th>
+                <th>ID</th>
+                <th>Buttons</th>
+                <th class="right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        `;
 
         renderButtonDiscoveries();
       }
@@ -2478,13 +2535,66 @@ let pendingSwitchSelectKey = null;
         }).join("");
       }
 
+      function renderSwitchButtonsReadonly(entry, buttons) {
+        if (!buttons.length) {
+          return '<p class="hint">No buttons defined for this switch.</p>';
+        }
+        const rows = buttons
+          .map((button) => {
+            const name = button.name || buildButtonFallbackName(entry, button);
+            const mask = button.mask ?? "";
+            const group = button.group_id ? getGroupDisplayName(button.group_id) : "—";
+            const type = button.type || "momentary";
+            return `<tr>
+              <td>${escapeHtml(name)}</td>
+              <td>${escapeHtml(String(mask))}</td>
+              <td>${escapeHtml(group)}</td>
+              <td>${escapeHtml(type)}</td>
+            </tr>`;
+          })
+          .join("");
+        return `
+          <table class="button-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Mask</th>
+                <th>Group</th>
+                <th>Type</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        `;
+      }
+
       function handleSwitchClick(event) {
-        const button = event.target.closest("button[data-action]");
+        const button = event.target.closest("[data-action]");
         if (!button) {
           return;
         }
         const { action } = button.dataset;
         if (!action) {
+          return;
+        }
+
+        if (action === "toggle-switch-expand") {
+          const key = button.dataset.key;
+          if (expandedSwitches.has(key)) {
+            expandedSwitches.delete(key);
+          } else {
+            expandedSwitches.add(key);
+          }
+          renderSwitches();
+          return;
+        }
+
+        if (action === "toggle-switch-edit") {
+          const key = button.dataset.key;
+          const isDraft = button.dataset.draft === "true";
+          state.editing.switches.add(key);
+          expandedSwitches.add(key);
+          renderSwitches();
           return;
         }
 
@@ -2585,6 +2695,7 @@ let pendingSwitchSelectKey = null;
           if (isDraft) {
             removeDraft("switches", key);
           }
+          expandedSwitches.add(key); // keep expanded to view summary
           renderSwitches();
           return;
         }
@@ -2593,6 +2704,7 @@ let pendingSwitchSelectKey = null;
           if (isDraft) {
             removeDraft("switches", key);
             state.editing.switches.delete(key);
+            expandedSwitches.delete(key);
             renderSwitches();
             return;
           }
@@ -2601,6 +2713,7 @@ let pendingSwitchSelectKey = null;
           }
           withErrorNotice(async () => {
             state.editing.switches.delete(key);
+            expandedSwitches.delete(key);
             await deleteRegistryItem("switches", key);
           });
           return;

@@ -1,7 +1,7 @@
 {
   "domain": "s2j_led_driver",
   "name": "LED Driver Controller",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "documentation": "https://github.com/steves2j/LightingController",
   "issue_tracker": "https://github.com/steves2j/LightingController/issues",
   "requirements": [

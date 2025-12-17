@@ -1256,8 +1256,14 @@ class LedRegistry:
 def serialize_registry_snapshot(registry: LedRegistry) -> dict[str, Any]:
     """Return a safe snapshot of registry contents for the API."""
 
+    controllers = deepcopy(registry.get_controllers())
+    for controller in controllers:
+        metadata = controller.get("metadata")
+        if isinstance(metadata, dict) and "serial_log" in metadata:
+            metadata.pop("serial_log", None)
+
     snapshot = {
-        "controllers": deepcopy(registry.get_controllers()),
+        "controllers": controllers,
         "drivers": deepcopy(registry.get_drivers()),
         "groups": deepcopy(registry.get_groups()),
         "led_outputs": registry.list_output_descriptors(),

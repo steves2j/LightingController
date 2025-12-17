@@ -223,6 +223,51 @@ button.secondary {
   box-shadow: 0 10px 25px rgba(15, 23, 42, 0.3);
 }
 
+.switch-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.switch-table th:first-child,
+.switch-table td:first-child {
+  width: 24px;
+}
+
+.switch-table th,
+.switch-table td {
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.switch-table th {
+  text-align: left;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.8rem;
+  color: rgba(226, 232, 240, 0.8);
+}
+
+.switch-table td.center {
+  text-align: center;
+}
+
+.switch-table td.right,
+.switch-table th.right {
+  text-align: right;
+}
+
+.switch-expander {
+  cursor: pointer;
+  font-weight: 700;
+  color: #e2e8f0;
+}
+
+.switch-detail td {
+  padding: 0;
+  background: transparent;
+  border: none;
+}
+
 .switch-card-header {
   display: flex;
   justify-content: space-between;

@@ -93,7 +93,7 @@
       }
       .switch-button {
         position: absolute;
-        width: 22%;
+        width: 26.4%;
         aspect-ratio: 1/1;
         background: url("/s2j_led_driver_static/led_driver_panel/Button.jpg") center/contain no-repeat;
         transform: translate(-50%, -50%);
@@ -278,16 +278,16 @@
       const SWITCH_BUTTON_POSITIONS = {
         1: [{ x: 50, y: 50 }],
         3: [
-          { x: 50, y: 32 },
+          { x: 50, y: 28 },
           { x: 50, y: 50 },
-          { x: 50, y: 68 },
+          { x: 50, y: 72 },
         ],
         5: [
           { x: 50, y: 50 },
-          { x: 32, y: 32 },
-          { x: 68, y: 32 },
-          { x: 32, y: 68 },
-          { x: 68, y: 68 },
+          { x: 28, y: 28 },
+          { x: 72, y: 28 },
+          { x: 28, y: 72 },
+          { x: 72, y: 72 },
         ],
       };
 
@@ -389,7 +389,11 @@
         return Number(value).toFixed(decimals);
       }
 
-      function getSwitchButtonCount(entry) {
+      function getSwitchButtonCount(entry, buttons = []) {
+        const btnCount = Math.min(Math.max(buttons.length || 0, 0), 5);
+        if (btnCount > 0) {
+          return btnCount;
+        }
         if (!entry || typeof entry !== "object") {
           return 5;
         }
@@ -563,9 +567,9 @@
           setActiveGroup(null);
           return;
         }
-        const count = SWITCH_BUTTON_POSITIONS[getSwitchButtonCount(entry)] ? getSwitchButtonCount(entry) : 5;
-        const positions = SWITCH_BUTTON_POSITIONS[count] || SWITCH_BUTTON_POSITIONS[5];
         const buttons = findButtonsForSwitch(entry);
+        const count = getSwitchButtonCount(entry, buttons);
+        const positions = SWITCH_BUTTON_POSITIONS[count] || SWITCH_BUTTON_POSITIONS[5];
         const maxButtons = Math.min(positions.length, buttons.length || positions.length);
         for (let i = 0; i < maxButtons; i += 1) {
           const button = buttons[i] || {};
