@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="svg3973" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:svg="http://www.w3.org/2000/svg" xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:ns1="http://sozi.baierouge.fr" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" version="1.1" viewBox="0 0 121.9 94.6">
+  <!-- Generator: Adobe Illustrator 29.2.1, SVG Export Plug-In . SVG Version: 2.1.0 Build 116)  -->
+  <defs>
+    <style>
+      .st0 {
+        fill: #dcdcdc;
+        stroke-width: 2.5px;
+      }
+
+      .st0, .st1, .st2, .st3 {
+        stroke: #0a0a0a;
+      }
+
+      .st0, .st1, .st2, .st3, .st4 {
+        stroke-linecap: square;
+      }
+
+      .st1 {
+        fill: #ffd10a;
+      }
+
+      .st1, .st2 {
+        stroke-width: 2px;
+      }
+
+      .st2 {
+        fill: #1dfe0a;
+      }
+
+      .st3 {
+        fill: #fff;
+        stroke-width: 4px;
+      }
+
+      .st4 {
+        fill: #666;
+        stroke: #191919;
+      }
+    </style>
+  </defs>
+  <sodipodi:namedview id="base" bordercolor="#666666" borderopacity="1.0" fit-margin-bottom="0" fit-margin-left="0" fit-margin-right="0" fit-margin-top="0" inkscape:current-layer="layer1" inkscape:cx="60.93056" inkscape:cy="47.319462" inkscape:document-units="px" inkscape:pageopacity="0.0" inkscape:pageshadow="2" inkscape:window-height="453" inkscape:window-maximized="0" inkscape:window-width="471" inkscape:window-x="22" inkscape:window-y="29" inkscape:zoom="0.35" pagecolor="#ffffff" showgrid="false"/>
+  <g id="layer1" inkscape:groupmode="layer" inkscape:label="Layer 1">
+    <g id="g3824">
+      <rect id="rect3822" class="st3" x="2" y="2" width="117.9" height="90.6" rx="4.5" ry="4.5"/>
+      <g id="g3807">
+        <g id="g3791">
+          <path id="rect3787" class="st0" d="M16,86.9h89.4c2.3,0,4.2-1.9,4.2-4.2V30.1s-21.7,0-21.7,0v-9.4h-8.7v-12.6s-36.9,0-36.9,0v12.6h-8.7v9.4H11.9v52.7c0,2.3,1.9,4.2,4.2,4.2h0Z" inkscape:connector-curvature="0" sodipodi:nodetypes="csccccccccccccsc"/>
+          <g id="g3777">
+            <rect id="rect2987" class="st4" x="22.3" y="64" width="3.9" height="22.8"/>
+            <rect id="rect3757" class="st4" x="95.3" y="64" width="3.9" height="22.8"/>
+            <rect id="rect3765" class="st4" x="74.5" y="64" width="3.9" height="22.8"/>
+            <rect id="rect3767" class="st4" x="64" y="64" width="3.9" height="22.8"/>
+            <rect id="rect3769" class="st4" x="53.6" y="64" width="3.9" height="22.8"/>
+            <rect id="rect3771" class="st4" x="43.2" y="64" width="3.9" height="22.8"/>
+            <rect id="rect3773" class="st4" x="32.7" y="64" width="3.9" height="22.8"/>
+            <rect id="rect3775" class="st4" x="84.9" y="64" width="3.9" height="22.8"/>
+          </g>
+        </g>
+        <rect id="rect3803" class="st2" x="11.6" y="11.6" width="17.1" height="13.9"/>
+        <rect id="rect3805" class="st1" x="92.8" y="11.6" width="17.1" height="13.9"/>
+      </g>
+    </g>
+  </g>
+</svg>
