@@ -162,11 +162,20 @@ class LedDriverMetricsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
 def _register_panel(hass: HomeAssistant) -> None:
     static_root = Path(__file__).parent / "www"
-    hass.http.register_static_path(
-        "/s2j_led_driver_static",
-        str(static_root),
-        cache_headers=True,
-    )
+    try:
+        hass.http.register_static_path(
+            "/s2j_led_driver_static",
+            str(static_root),
+            cache_headers=True,
+        )
+    except AttributeError:
+        try:
+            hass.http.async_register_static_paths(
+                [("/s2j_led_driver_static", str(static_root))]
+            )
+        except AttributeError:
+            # Older HA versions: fall back to aiohttp router
+            hass.http.app.router.add_static("/s2j_led_driver_static", str(static_root))
 
     frontend.async_register_built_in_panel(
         hass,
