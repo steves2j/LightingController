@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 from homeassistant.components import frontend
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.typing import ConfigType
@@ -162,20 +163,19 @@ class LedDriverMetricsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
 def _register_panel(hass: HomeAssistant) -> None:
     static_root = Path(__file__).parent / "www"
-    try:
+    if hasattr(hass.http, "register_static_path"):
         hass.http.register_static_path(
             "/s2j_led_driver_static",
             str(static_root),
             cache_headers=True,
         )
-    except AttributeError:
-        try:
-            hass.http.async_register_static_paths(
-                [("/s2j_led_driver_static", str(static_root))]
-            )
-        except AttributeError:
-            # Older HA versions: fall back to aiohttp router
-            hass.http.app.router.add_static("/s2j_led_driver_static", str(static_root))
+    elif hasattr(hass.http, "async_register_static_paths"):
+        hass.http.async_register_static_paths(
+            [StaticPathConfig("/s2j_led_driver_static", str(static_root), cache_headers=True)]
+        )
+    else:
+        # Very old HA: fall back to aiohttp router
+        hass.http.app.router.add_static("/s2j_led_driver_static", str(static_root))
 
     frontend.async_register_built_in_panel(
         hass,
