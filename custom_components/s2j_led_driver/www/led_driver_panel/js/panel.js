@@ -66,7 +66,7 @@ import {
   importRegistry,
 } from "./api.js";
 
-const PANEL_VERSION = "5.5"; // increment for visibility per sync request
+const PANEL_VERSION = "5.7"; // increment for visibility per sync request
 // Expose version globally for other pages (e.g., controller_overview)
 if (typeof window !== "undefined") {
   window.LED_DRIVER_PANEL_VERSION = PANEL_VERSION;
@@ -994,6 +994,7 @@ let pendingSwitchSelectKey = null;
         const buttonCount = Number(entry.button_count ?? 5);
         const hasBuzzer = entry.has_buzzer ? "checked" : "";
         const flashLeds = entry.flash_leds === false ? "" : "checked";
+        const orientationFlipped = entry.orientation_flipped ? "checked" : "";
         const metadataJson = escapeHtml(JSON.stringify(entry.metadata || {}));
         const buttons = getButtonsForSwitch(entry);
         const showButtonEditor = Boolean(entry.id);
@@ -1039,6 +1040,10 @@ let pendingSwitchSelectKey = null;
               <label>
                 Flash LEDs
                 <input type="checkbox" data-field="flash_leds" ${flashLeds} />
+              </label>
+              <label>
+                Flip Orientation
+                <input type="checkbox" data-field="orientation_flipped" ${orientationFlipped} />
               </label>
             </div>
             ${
@@ -3081,6 +3086,9 @@ function findSwitchByKey(key) {
           button_count: Number(initial.button_count ?? 5),
           has_buzzer: Boolean(initial.has_buzzer || false),
           flash_leds: initial.flash_leds === false ? false : true,
+          orientation_flipped: Boolean(
+            initial.orientation_flipped || initial.metadata?.orientation_flipped || false
+          ),
           metadata,
         };
         addDraft("switches", draft);
@@ -3128,7 +3136,9 @@ function findSwitchByKey(key) {
           return;
         }
 
-        const discoveries = (state.learnedButtons || []).slice();
+        const discoveries = (state.learnedButtons || [])
+          .filter((entry) => Number(entry.switch) !== 254)
+          .slice();
         if (!discoveries.length) {
           buttonDiscoveriesContainer.innerHTML = "";
           buttonDiscoveriesContainer.classList.add("hidden");
@@ -3202,6 +3212,9 @@ function findSwitchByKey(key) {
               switch: existing.switch,
               mask: Number(entry.mask) || 1,
             });
+            expandedSwitches.add(getItemKey(existing));
+            state.editing.switches.add(getItemKey(existing));
+            renderSwitches();
             clearError();
             return;
           }
@@ -3655,6 +3668,7 @@ function readControllerCard(card) {
         const countInput = card.querySelector('[data-field="button_count"]');
         const buzzerInput = card.querySelector('[data-field="has_buzzer"]');
         const flashInput = card.querySelector('[data-field="flash_leds"]');
+        const orientationInput = card.querySelector('[data-field="orientation_flipped"]');
 
         const switchValue = Number(switchInput?.value);
         if (!Number.isInteger(switchValue) || switchValue < 0) {
@@ -3704,6 +3718,7 @@ function readControllerCard(card) {
           button_count: buttonCount,
           has_buzzer: Boolean(buzzerInput?.checked),
           flash_leds: Boolean(flashInput?.checked),
+          orientation_flipped: Boolean(orientationInput?.checked),
           metadata,
         };
       }

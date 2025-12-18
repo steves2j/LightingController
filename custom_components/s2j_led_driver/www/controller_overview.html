@@ -278,16 +278,16 @@
       const SWITCH_BUTTON_POSITIONS = {
         1: [{ x: 50, y: 50 }],
         3: [
-          { x: 50, y: 28 },
+          { x: 50, y: 25 },
           { x: 50, y: 50 },
-          { x: 50, y: 72 },
+          { x: 50, y: 75 },
         ],
         5: [
+          { x: 35, y: 25 },
+          { x: 65, y: 25 },
           { x: 50, y: 50 },
-          { x: 28, y: 28 },
-          { x: 72, y: 28 },
-          { x: 28, y: 72 },
-          { x: 72, y: 72 },
+          { x: 35, y: 75 },
+          { x: 65, y: 75 },
         ],
       };
 
@@ -408,6 +408,15 @@
         if (value < 1) return 1;
         if (value > 5) return 5;
         return value;
+      }
+
+      function isSwitchFlipped(entry) {
+        if (!entry || typeof entry !== "object") return false;
+        if (entry.orientation_flipped === true || entry.orientation === true) return true;
+        if (entry.metadata && typeof entry.metadata === "object") {
+          if (entry.metadata.orientation_flipped === true || entry.metadata.orientation === true) return true;
+        }
+        return false;
       }
 
       function findSwitchByValue(value) {
@@ -569,21 +578,57 @@
         }
         const buttons = findButtonsForSwitch(entry);
         const count = getSwitchButtonCount(entry, buttons);
-        const positions = SWITCH_BUTTON_POSITIONS[count] || SWITCH_BUTTON_POSITIONS[5];
-        const maxButtons = Math.min(positions.length, buttons.length || positions.length);
-        for (let i = 0; i < maxButtons; i += 1) {
-          const button = buttons[i] || {};
-          const pos = positions[i];
+        const flipped = isSwitchFlipped(entry);
+        const assignments = [];
+
+        if (count === 5 || count === 3) {
+          const positions = SWITCH_BUTTON_POSITIONS[count] || SWITCH_BUTTON_POSITIONS[5];
+          const maskOrder =
+            count === 5
+              ? flipped
+                ? [4, 8, 16, 2, 1]
+                : [1, 2, 16, 8, 4]
+              : flipped
+              ? [8, 16, 1]
+              : [1, 16, 8];
+          const used = new Set();
+          maskOrder.forEach((mask) => {
+            const match = buttons.find(
+              (btn) => Number(btn.mask) === Number(mask) && !used.has(btn)
+            );
+            if (match && assignments.length < positions.length) {
+              assignments.push({ button: match, pos: positions[assignments.length] });
+              used.add(match);
+            }
+          });
+          buttons.forEach((btn) => {
+            if (used.has(btn)) return;
+            if (assignments.length < positions.length) {
+              assignments.push({ button: btn, pos: positions[assignments.length] });
+              used.add(btn);
+            }
+          });
+        }
+
+        if (!assignments.length) {
+          const positions = SWITCH_BUTTON_POSITIONS[count] || SWITCH_BUTTON_POSITIONS[5];
+          const maxButtons = Math.min(positions.length, buttons.length || positions.length);
+          for (let i = 0; i < maxButtons; i += 1) {
+            assignments.push({ button: buttons[i] || {}, pos: positions[i] });
+          }
+        }
+
+        assignments.forEach(({ button, pos }, idx) => {
           const el = document.createElement("div");
           el.className = "switch-button";
           el.style.left = `${pos.x}%`;
           el.style.top = `${pos.y}%`;
-          const mask = button.mask ?? (1 << i);
+          const mask = button.mask ?? (1 << idx);
           const group = getGroupById(button.group_id);
           if (group?.is_on) {
             el.classList.add("is-on");
           }
-          el.title = button.name || `Button ${i + 1}`;
+          el.title = button.name || `Button ${idx + 1}`;
           el.dataset.switch = entry.switch ?? "";
           el.dataset.mask = mask;
           el.dataset.groupId = button.group_id || "";
@@ -591,7 +636,7 @@
           el.addEventListener("pointerup", handleButtonUp);
           el.addEventListener("pointerleave", handleButtonUp);
           switchButtonLayer.appendChild(el);
-        }
+        });
       }
 
       function renderSwitchDropdown() {

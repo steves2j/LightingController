@@ -463,6 +463,7 @@ class LedRegistry:
                 "button_count": _normalize_button_count(switch.get("button_count", 5)),
                 "has_buzzer": _normalize_bool(switch.get("has_buzzer", False)),
                 "flash_leds": _normalize_bool(switch.get("flash_leds", True)),
+                "orientation_flipped": _normalize_bool(switch.get("orientation_flipped", False)),
                 "metadata": _normalize_metadata(switch.get("metadata", {})),
             },
         )
@@ -481,6 +482,9 @@ class LedRegistry:
                 ),
                 "flash_leds": _normalize_bool(
                     switch.get("flash_leds", stored.get("flash_leds", True))
+                ),
+                "orientation_flipped": _normalize_bool(
+                    switch.get("orientation_flipped", stored.get("orientation_flipped", False))
                 ),
                 "metadata": _normalize_metadata(switch.get("metadata", stored.get("metadata", {}))),
             }
