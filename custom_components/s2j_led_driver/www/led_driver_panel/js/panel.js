@@ -66,7 +66,7 @@ import {
   importRegistry,
 } from "./api.js";
 
-const PANEL_VERSION = "5.7"; // increment for visibility per sync request
+const PANEL_VERSION = "5.8"; // increment for visibility per sync request
 // Expose version globally for other pages (e.g., controller_overview)
 if (typeof window !== "undefined") {
   window.LED_DRIVER_PANEL_VERSION = PANEL_VERSION;
@@ -102,13 +102,14 @@ const exportButton = document.getElementById("export-registry");
 const importInput = document.getElementById("import-registry");
 const importButton = document.getElementById("import-registry-button");
 const expandedSwitches = new Set();
+let patchPanelEditing = false;
 
       function startAutoRefresh() {
         if (autoRefreshTimer || !AUTO_REFRESH_INTERVAL) {
           return;
         }
         autoRefreshTimer = setInterval(() => {
-          if (!state.entryId || refreshInFlight) {
+          if (!state.entryId || refreshInFlight || patchPanelEditing) {
             return;
           }
           if (isEditing()) {
@@ -2136,6 +2137,21 @@ let pendingSwitchSelectKey = null;
             </form>
           </div>
         `;
+        const form = patchPanelDetails.querySelector("form[data-patch-port-form]");
+        if (form) {
+          form.addEventListener("focusin", () => {
+            patchPanelEditing = true;
+            stopAutoRefresh();
+          });
+          form.addEventListener("focusout", () => {
+            setTimeout(() => {
+              if (!form.contains(document.activeElement)) {
+                patchPanelEditing = false;
+                startAutoRefresh();
+              }
+            }, 0);
+          });
+        }
       }
 
       function handlePatchPanelDetailsSubmit(event) {
@@ -2144,6 +2160,8 @@ let pendingSwitchSelectKey = null;
           return;
         }
         event.preventDefault();
+        patchPanelEditing = false;
+        startAutoRefresh();
         if (!state.entryId) {
           setError("Select an integration entry before updating patch panel details.");
           return;
@@ -2161,6 +2179,8 @@ let pendingSwitchSelectKey = null;
           return;
         }
         event.preventDefault();
+        patchPanelEditing = false;
+        startAutoRefresh();
         renderPatchPanelDetails();
       }
 
