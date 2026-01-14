@@ -164,18 +164,7 @@ class LedDriverMetricsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 async def _register_panel(hass: HomeAssistant) -> None:
     static_root = Path(__file__).parent / "www"
     mounted = False
-    if hasattr(hass.http, "register_static_path"):
-        try:
-            hass.http.register_static_path(
-                "/s2j_led_driver_static",
-                str(static_root),
-                cache_headers=True,
-            )
-            mounted = True
-        except Exception:  # pragma: no cover - compatibility fallback
-            mounted = False
-
-    if not mounted and hasattr(hass.http, "async_register_static_paths"):
+    if hasattr(hass.http, "async_register_static_paths"):
         try:
             await hass.http.async_register_static_paths(
                 [StaticPathConfig("/s2j_led_driver_static", str(static_root), cache_headers=True)]

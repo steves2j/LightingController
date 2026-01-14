@@ -32,6 +32,7 @@ class SerialHelper:
         self._reconnect_task: Optional[asyncio.Task] = None
         self._reconnect_delay = 1.0
         self._last_reconnect_error: Optional[str] = None
+        self._last_error: Optional[str] = None
         self._closing = False
         self._reconnecting = False
 
@@ -46,6 +47,10 @@ class SerialHelper:
     @property
     def is_connected(self) -> bool:
         return self._writer is not None and not self._writer.is_closing()
+
+    @property
+    def last_error(self) -> Optional[str]:
+        return self._last_error
 
     async def async_connect(self) -> None:
         """Open the serial connection."""
@@ -65,9 +70,12 @@ class SerialHelper:
                 baudrate=self._baudrate,
             )
         except serial.SerialException as err:
-            raise SerialHelperError(f"Unable to open serial port {self._port}: {err}") from err
+            message = f"Unable to open serial port {self._port}: {err}"
+            self._last_error = message
+            raise SerialHelperError(message) from err
 
         _LOGGER.debug("SerialHelper connected to %s at %s baud", self._port, self._baudrate)
+        self._last_error = None
         self._ensure_reader()
         self._ensure_writer()
         self._reconnecting = False
@@ -177,6 +185,7 @@ class SerialHelper:
     async def _handle_serial_failure(self, error: Optional[Exception] = None) -> None:
         if error:
             _LOGGER.warning("SerialHelper detected serial failure: %s", error)
+            self._last_error = str(error)
         if self._closing:
             return
         if self._reconnecting:

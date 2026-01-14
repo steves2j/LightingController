@@ -15,10 +15,12 @@ from homeassistant.helpers.storage import Store
 
 STORAGE_KEY = "s2j_led_driver_registry"
 STORAGE_VERSION = 1
+STORAGE_META_KEY = "s2j_led_driver_registry_meta"
+STORAGE_META_VERSION = 1
 
 TOTAL_OUTPUTS_PER_DRIVER = 4
 SSR_MAX_ENTRIES = 10
-SSR_MAX_BITS = 10
+SSR_ALLOWED_BITS = [1, 4, 64, 128, 512, 1024, 2048, 8192, 16384, 32768]
 PATCH_PANEL_PORTS = 48
 
 RegistryListener = Callable[[], None]
@@ -69,6 +71,15 @@ def _normalize_bool(value: Any, default: bool = False) -> bool:
     return bool(value)
 
 
+def _normalize_optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _normalize_button_count(value: Any, default: int = 5) -> int:
     """Clamp a button count to the supported range."""
 
@@ -107,8 +118,8 @@ def _validate_ssr_bit(value: Any) -> int:
         bit = int(value)
     except (TypeError, ValueError):
         raise ValueError("SSR bit index must be an integer") from None
-    if bit < 0 or bit >= SSR_MAX_BITS:
-        raise ValueError(f"SSR bit index must be between 0 and {SSR_MAX_BITS - 1}")
+    if bit not in SSR_ALLOWED_BITS:
+        raise ValueError("SSR bit index must be one of the supported values")
     return bit
 
 
@@ -127,6 +138,7 @@ class LedRegistry:
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._store = Store[dict[str, Any]](hass, STORAGE_VERSION, STORAGE_KEY)
+        self._meta_store = Store[dict[str, Any]](hass, STORAGE_META_VERSION, STORAGE_META_KEY)
         self._data: dict[str, dict[str, Any]] = {
             "controllers": {},
             "drivers": {},
@@ -142,6 +154,13 @@ class LedRegistry:
                 "ports": {},
             },
         }
+        self._metadata: dict[str, dict[str, Any]] = {
+            "controllers": {},
+            "drivers": {},
+            "switches": {},
+            "buttons": {},
+            "learned_buttons": {},
+        }
         self._listeners: list[RegistryListener] = []
         self._save_lock = asyncio.Lock()
 
@@ -155,13 +174,26 @@ class LedRegistry:
         migrated = False
         if (loaded := await self._store.async_load()) is not None:
             self._data = loaded
-            migrated = self._migrate_legacy_data()
+        if (loaded_meta := await self._meta_store.async_load()) is not None:
+            self._metadata = loaded_meta
+        else:
+            extracted = self._extract_metadata(self._data)
+            if any(section for section in extracted.values()):
+                self._metadata = extracted
+                migrated = True
+
+        self._apply_metadata(self._data, self._metadata)
+        migrated = self._migrate_legacy_data() or migrated
         if migrated:
             await self.async_save()
 
     async def async_save(self) -> None:
         async with self._save_lock:
-            await self._store.async_save(self._data)
+            base_payload = self._strip_metadata(self._data)
+            meta_payload = self._extract_metadata(self._data)
+            self._metadata = meta_payload
+            await self._store.async_save(base_payload)
+            await self._meta_store.async_save(meta_payload)
 
     async def async_commit(self) -> None:
         await self.async_save()
@@ -180,9 +212,11 @@ class LedRegistry:
             for item in items:
                 if not isinstance(item, dict):
                     continue
-                item_id = item.get("id") or _new_id(prefix)
-                item["id"] = item_id
-                result[str(item_id)] = item
+                cleaned = deepcopy(item)
+                cleaned.pop("metadata", None)
+                item_id = cleaned.get("id") or _new_id(prefix)
+                cleaned["id"] = item_id
+                result[str(item_id)] = cleaned
             return result
 
         controllers = _dict_from_list(snapshot.get("controllers"), "controller")
@@ -190,8 +224,6 @@ class LedRegistry:
         groups = _dict_from_list(snapshot.get("groups"), "group")
         switches = _dict_from_list(snapshot.get("switches"), "switch")
         buttons = _dict_from_list(snapshot.get("buttons"), "button")
-        learned_buttons = _dict_from_list(snapshot.get("learned_buttons"), "learned_button")
-
         ssr = snapshot.get("ssr") if isinstance(snapshot.get("ssr"), dict) else {}
         patch_panel = snapshot.get("patch_panel") if isinstance(snapshot.get("patch_panel"), dict) else {}
 
@@ -201,7 +233,7 @@ class LedRegistry:
             "groups": groups,
             "switches": switches,
             "buttons": buttons,
-            "learned_buttons": learned_buttons,
+            "learned_buttons": {},
             "ssr": {
                 "base_address": ssr.get("base_address", 0),
                 "entries": ssr.get("entries", {}),
@@ -210,6 +242,7 @@ class LedRegistry:
                 "ports": patch_panel.get("ports", {}),
             },
         }
+        self._apply_metadata(self._data, self._metadata)
         await self.async_commit()
 
     @callback
@@ -269,6 +302,19 @@ class LedRegistry:
             if "ports" not in patch_panel or not isinstance(patch_panel["ports"], dict):
                 patch_panel["ports"] = {}
                 changed = True
+
+        ssr_entries = data.get("ssr", {}).get("entries", {})
+        if isinstance(ssr_entries, dict):
+            for entry in ssr_entries.values():
+                try:
+                    bit_index = int(entry.get("bit_index"))
+                except (TypeError, ValueError):
+                    continue
+                if bit_index in SSR_ALLOWED_BITS:
+                    continue
+                if 0 <= bit_index < len(SSR_ALLOWED_BITS):
+                    entry["bit_index"] = SSR_ALLOWED_BITS[bit_index]
+                    changed = True
 
         switch_lookup: dict[int, str] = {}
         for switch_entry in data["switches"].values():
@@ -396,6 +442,59 @@ class LedRegistry:
 
         return changed
 
+    @staticmethod
+    def _extract_metadata(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        metadata: dict[str, dict[str, Any]] = {
+            "controllers": {},
+            "drivers": {},
+            "switches": {},
+            "buttons": {},
+            "learned_buttons": {},
+        }
+
+        for section in ("controllers", "drivers", "switches", "buttons"):
+            entries = data.get(section, {})
+            if not isinstance(entries, dict):
+                continue
+            for entry_id, entry in entries.items():
+                meta = entry.get("metadata")
+                if isinstance(meta, dict) and meta:
+                    metadata[section][entry_id] = deepcopy(meta)
+
+        learned_buttons = data.get("learned_buttons")
+        if isinstance(learned_buttons, dict) and learned_buttons:
+            metadata["learned_buttons"] = deepcopy(learned_buttons)
+
+        return metadata
+
+    @staticmethod
+    def _apply_metadata(data: dict[str, Any], metadata: dict[str, Any]) -> None:
+        for section in ("controllers", "drivers", "switches", "buttons"):
+            entries = data.get(section, {})
+            meta_section = metadata.get(section, {})
+            if not isinstance(entries, dict) or not isinstance(meta_section, dict):
+                continue
+            for entry_id, entry in entries.items():
+                if entry_id in meta_section:
+                    entry["metadata"] = deepcopy(meta_section[entry_id])
+
+        learned = metadata.get("learned_buttons")
+        if isinstance(learned, dict) and learned:
+            data["learned_buttons"] = deepcopy(learned)
+
+    @staticmethod
+    def _strip_metadata(data: dict[str, Any]) -> dict[str, Any]:
+        stripped = deepcopy(data)
+        for section in ("controllers", "drivers", "switches", "buttons"):
+            entries = stripped.get(section, {})
+            if not isinstance(entries, dict):
+                continue
+            for entry in entries.values():
+                if isinstance(entry, dict):
+                    entry.pop("metadata", None)
+        stripped.pop("learned_buttons", None)
+        return stripped
+
     # Controllers -----------------------------------------------------------------
 
     def get_controllers(self) -> list[dict[str, Any]]:
@@ -415,6 +514,7 @@ class LedRegistry:
                 "has_can_interface": _normalize_bool(
                     controller.get("has_can_interface", controller.get("can_interface", False))
                 ),
+                "can_sender_id": _normalize_optional_int(controller.get("can_sender_id")),
             },
         )
 
@@ -430,6 +530,9 @@ class LedRegistry:
                         "has_can_interface",
                         controller.get("can_interface", stored.get("has_can_interface", False)),
                     )
+                ),
+                "can_sender_id": _normalize_optional_int(
+                    controller.get("can_sender_id", stored.get("can_sender_id"))
                 ),
             }
         )
@@ -608,6 +711,25 @@ class LedRegistry:
             return
 
         self._remove_learned_switch_entry(button.get("switch"), button.get("mask"))
+        await self.async_commit()
+
+    async def async_clear_metadata(self) -> None:
+        """Remove all stored metadata and learned button history."""
+        for section in ("controllers", "drivers", "switches", "buttons"):
+            entries = self._data.get(section, {})
+            if not isinstance(entries, dict):
+                continue
+            for entry in entries.values():
+                if isinstance(entry, dict):
+                    entry.pop("metadata", None)
+                if section == "drivers":
+                    outputs = entry.get("outputs", []) if isinstance(entry, dict) else []
+                    if isinstance(outputs, list):
+                        for output in outputs:
+                            if isinstance(output, dict):
+                                output.pop("metadata", None)
+
+        self._data["learned_buttons"] = {}
         await self.async_commit()
 
     async def async_append_serial_log(
@@ -1183,8 +1305,8 @@ class LedRegistry:
                 bit = int(bit_index)
             except (TypeError, ValueError):
                 continue
-            if 0 <= bit < SSR_MAX_BITS and bool(entry.get("is_on")):
-                mask |= (1 << bit)
+            if bit in SSR_ALLOWED_BITS and bool(entry.get("is_on")):
+                mask |= bit
         return mask
 
     def set_ssr_entry_state(self, entry_id: str, turn_on: bool) -> int:

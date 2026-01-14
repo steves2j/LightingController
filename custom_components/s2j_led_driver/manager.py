@@ -14,7 +14,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant, callback
 
 from .const import DEFAULT_BAUDRATE
-from .registry import LedRegistry
+from .registry import LedRegistry, SSR_ALLOWED_BITS
 from .serial_helper import SerialHelper, SerialHelperError
 from .json_helper import JsonHelper
 
@@ -27,7 +27,7 @@ _SWITCH_DOUBLE_PRESS_WINDOW = 0.5
 _SWITCH_HOLD_THRESHOLD = 0.4
 _PWM_STEP_INTERVAL = 0.3
 _PWM_STEP_SIZE = 1
-_SSR_BIT_COUNT = 10
+_SSR_MASK = 0xFFFF
 
 
 @dataclass
@@ -192,6 +192,21 @@ class LedDriverManager:
         self._json_helper.register_listener("status", self._on_status_message)
         self._listeners_registered = True
 
+    def get_controller_serial_status(self) -> dict[str, dict[str, Any]]:
+        statuses: dict[str, dict[str, Any]] = {}
+        for controller in self._registry.get_controllers():
+            controller_id = controller.get("id")
+            if not controller_id:
+                continue
+            helper = self._serial_helpers.get(controller_id)
+            is_open = bool(helper and helper.is_connected)
+            error = helper.last_error if helper is not None else None
+            statuses[controller_id] = {
+                "is_open": is_open,
+                "error": error,
+            }
+        return statuses
+
     def _on_led_channel_state(self, controller_id: str, message: dict[str, Any]) -> None:
         self._hass.async_create_task(self._process_led_channel_state(controller_id, message))
 
@@ -257,6 +272,18 @@ class LedDriverManager:
                 raise LedDriverError("CAN controller interface is not connected")
             return controller_id
         raise LedDriverError("No controller is configured as the CAN interface")
+
+    def _get_can_sender_id(self, controller_id: str) -> str:
+        for controller in self._registry.get_controllers():
+            if controller.get("id") == controller_id:
+                sender_id = controller.get("can_sender_id")
+                try:
+                    return str(int(sender_id))
+                except (TypeError, ValueError):
+                    if sender_id is None:
+                        return "0"
+                    return str(sender_id)
+        return "0"
 
     async def async_apply_group_action(self, group_id: str, action: str) -> dict[str, Any]:
         """Turn a group on/off and propagate to controllers."""
@@ -571,30 +598,31 @@ class LedDriverManager:
         if entry is None:
             raise LedDriverError(f"Unknown SSR entry {ssr_id}")
         bit_index = _to_int(entry.get("bit_index"))
-        if bit_index is None or bit_index < 0 or bit_index >= _SSR_BIT_COUNT:
+        if bit_index is None or bit_index not in SSR_ALLOWED_BITS:
             raise LedDriverError("SSR entry is missing a valid bit index")
 
         mask = self._registry.get_ssr_state_mask()
         if turn_on:
-            mask |= 1 << bit_index
+            mask |= bit_index
         else:
-            mask &= ~(1 << bit_index)
-        mask &= (1 << _SSR_BIT_COUNT) - 1
+            mask &= ~bit_index
+        mask &= _SSR_MASK
 
         data = [
             base_address & 0xFF,
+            0,
+            3,
             (mask >> 8) & 0xFF,
             mask & 0xFF,
-            0,
-            0,
-            0,
-            0,
-            0,
+            0x33,
+            0x22,
+            0x11,
         ]
         message = {
             "cm": "can",
             "a": "send",
-            "data": data,
+            "i": self._get_can_sender_id(can_controller_id),
+            "d": data,
         }
 
         _LOGGER.debug(

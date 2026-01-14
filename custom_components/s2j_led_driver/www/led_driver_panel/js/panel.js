@@ -26,7 +26,7 @@ import {
   addSwitchButton,
   addSsrButton,
 } from "./dom.js";
-import { SWITCH_MASK_CHOICES, AUTO_REFRESH_INTERVAL, SSR_MAX_ENTRIES } from "./constants.js";
+import { SWITCH_MASK_CHOICES, AUTO_REFRESH_INTERVAL, SSR_MAX_ENTRIES, SSR_BIT_CHOICES } from "./constants.js";
 import {
   state,
   isEditing,
@@ -64,9 +64,10 @@ import {
   waitForHass,
   fetchRegistry,
   importRegistry,
+  clearRegistryMetadata,
 } from "./api.js";
 
-const PANEL_VERSION = "5.8"; // increment for visibility per sync request
+const PANEL_VERSION = "6.2"; // increment for visibility per sync request
 // Expose version globally for other pages (e.g., controller_overview)
 if (typeof window !== "undefined") {
   window.LED_DRIVER_PANEL_VERSION = PANEL_VERSION;
@@ -89,6 +90,35 @@ function confirmDeletion(message) {
   }
   return window.confirm(message);
 }
+
+function stripRegistryMetadata(snapshot) {
+  const sanitized = clone(snapshot || {});
+  const stripEntries = (items) => {
+    if (!Array.isArray(items)) {
+      return items;
+    }
+    return items.map((item) => {
+      if (item && typeof item === "object") {
+        delete item.metadata;
+        if (Array.isArray(item.outputs)) {
+          item.outputs.forEach((output) => {
+            if (output && typeof output === "object") {
+              delete output.metadata;
+            }
+          });
+        }
+      }
+      return item;
+    });
+  };
+
+  sanitized.controllers = stripEntries(sanitized.controllers);
+  sanitized.drivers = stripEntries(sanitized.drivers);
+  sanitized.switches = stripEntries(sanitized.switches);
+  sanitized.buttons = stripEntries(sanitized.buttons);
+  delete sanitized.learned_buttons;
+  return sanitized;
+}
 const svgPortCache = {
         top: null,
         bottom: null,
@@ -101,6 +131,7 @@ let pendingRefreshOptions = null;
 const exportButton = document.getElementById("export-registry");
 const importInput = document.getElementById("import-registry");
 const importButton = document.getElementById("import-registry-button");
+const clearMetadataButton = document.getElementById("clear-metadata");
 const expandedSwitches = new Set();
 let patchPanelEditing = false;
 
@@ -138,7 +169,8 @@ if (exportButton) {
     }
     try {
       const snapshot = await fetchRegistry(state.entryId);
-      const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json" });
+      const exportSnapshot = stripRegistryMetadata(snapshot);
+      const blob = new Blob([JSON.stringify(exportSnapshot, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -168,7 +200,8 @@ if (importInput) {
     try {
       const text = await file.text();
       const snapshot = JSON.parse(text);
-      await importRegistry(state.entryId, snapshot);
+      const importSnapshot = stripRegistryMetadata(snapshot);
+      await importRegistry(state.entryId, importSnapshot);
       await refreshAll({ showStatus: true, force: true });
       setError("");
     } catch (error) {
@@ -178,6 +211,22 @@ if (importInput) {
       event.target.value = "";
     }
   });
+}
+
+if (clearMetadataButton) {
+  clearMetadataButton.addEventListener("click", () =>
+    withErrorNotice(async () => {
+      if (!state.entryId) {
+        setError("Select an integration first.");
+        return;
+      }
+      if (!confirmDeletion("Clear all metadata (serial logs, status history, learned buttons)?")) {
+        return;
+      }
+      await clearRegistryMetadata(state.entryId);
+      await refreshAll({ showStatus: true, force: true });
+    })
+  );
 }
 
       entrySelect.addEventListener("change", () => {
@@ -1120,6 +1169,15 @@ let pendingSwitchSelectKey = null;
         const metadataCount = controller.metadata ? Object.keys(controller.metadata).length : 0;
         const baud = controller.baudrate || 115200;
         const metaLabel = metadataCount ? `${metadataCount} meta` : "";
+        const serialStatus = controller.serial_status || {};
+        const isOpen = Boolean(serialStatus.is_open);
+        const errorMessage = serialStatus.error;
+        const serialBadge = isDraft
+          ? ""
+          : `<span class="badge ${isOpen ? "on" : "off"}">${isOpen ? "Open" : "Closed"}</span>`;
+        const serialError = errorMessage
+          ? `<span class="controller-serial-error" title="${escapeHtml(errorMessage)}">!</span>`
+          : "";
         const pollingEnabled = Boolean(controller.polling_enabled);
         const canInterface = Boolean(controller.has_can_interface);
         const activeCanId = state.controllers.find((entry) => entry.has_can_interface)?.id || null;
@@ -1168,7 +1226,13 @@ let pendingSwitchSelectKey = null;
               ${isDraft ? "New Controller" : controller.name || controller.id || "Controller"}
               ${metaDetails ? `<span class="hint controller-meta">${metaDetails}</span>` : ""}
             </td>
-            <td>${controller.port || "—"}</td>
+            <td>
+              <div class="controller-serial-status">
+                <span>${controller.port || "—"}</span>
+                ${serialBadge}
+                ${serialError}
+              </div>
+            </td>
             <td>${baud}${metaLabel ? ` · ${metaLabel}` : ""}</td>
             <td>${canInterfaceCell}</td>
             <td class="controller-actions-cell">
@@ -1210,6 +1274,12 @@ let pendingSwitchSelectKey = null;
           disableCanCheckbox ? " disabled" : ""
         } />
                     <span>CAN Interface</span>
+                  </label>
+                  <label>
+                    CAN Sender ID
+                    <input data-field="can_sender_id" type="number" value="${
+                      Number.isFinite(Number(controller.can_sender_id)) ? Number(controller.can_sender_id) : ""
+                    }" />
                   </label>
                 </div>
                 <div class="inline">
@@ -1545,6 +1615,7 @@ let pendingSwitchSelectKey = null;
         const bitIndex = Number(entry.bit_index ?? 0);
         const imageSrc = entry.is_on ? "SSROn.jpg" : "SSR.jpg";
         const stateAttr = entry.is_on ? "on" : "off";
+        const toggleLabel = entry.is_on ? "Turn Off" : "Turn On";
 
         return `
           <div class="ssr-tile" data-key="${key}">
@@ -1560,6 +1631,9 @@ let pendingSwitchSelectKey = null;
               <small>${groupLabel} · Bit ${bitIndex}</small>
             </div>
             <div class="row-actions ssr-actions">
+              <button class="secondary ssr-toggle-button" data-action="toggle-ssr" data-ssr-id="${entry.id || ""}" data-current-state="${stateAttr}"${
+                toggleDisabled ? " disabled" : ""
+              }>${toggleLabel}</button>
               <button class="secondary" data-action="edit-ssr" data-key="${key}" data-draft="${isDraft}">Edit</button>
               <button class="danger" data-action="delete-ssr" data-key="${key}" data-draft="${isDraft}">${
                 isDraft ? "Discard" : "Delete"
@@ -1650,18 +1724,20 @@ let pendingSwitchSelectKey = null;
           bit_index: Number(bitInput?.value),
           group_id: groupInput?.value || null,
         };
-        if (!Number.isInteger(payload.bit_index) || payload.bit_index < 0 || payload.bit_index >= SSR_MAX_ENTRIES) {
-          throw new Error("Select a valid bit index.");
+        if (!SSR_BIT_CHOICES.includes(payload.bit_index)) {
+          throw new Error("Select a valid SSR bit value.");
         }
         return payload;
       }
 
       function handleSsrClick(event) {
-        const button = event.target.closest("button[data-action]");
+        const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+        const button = target?.closest("button[data-action]");
         if (!button) {
           return;
         }
         const action = button.dataset.action;
+        console.debug("SSR click action:", action, "id:", button.dataset.ssrId || button.dataset.key);
         if (action === "toggle-ssr") {
           handleSsrToggle(button);
           return;
@@ -1768,6 +1844,15 @@ let pendingSwitchSelectKey = null;
       }
 
       function handleSsrToggle(button) {
+        console.debug(
+          "SSR toggle requested:",
+          "entryId=",
+          state.entryId,
+          "ssrId=",
+          button.dataset.ssrId,
+          "current=",
+          button.dataset.currentState
+        );
         if (!state.entryId) {
           setError("Select an integration entry before toggling SSR outputs.");
           return;
@@ -1793,24 +1878,33 @@ let pendingSwitchSelectKey = null;
         (async () => {
           try {
             await setSsrState(state.entryId, ssrId, desired);
-            button.dataset.currentState = desired ? "on" : "off";
-            const image = button.querySelector("img");
-            if (image) {
-              image.src = desired ? "SSROn.jpg" : "SSR.jpg";
-            }
+            updateSsrToggleUi(ssrId, desired);
             await refreshAll({ showStatus: false, force: true });
           } catch (error) {
             console.error(error);
             setError(error.message || "Failed to toggle SSR output");
-            button.dataset.currentState = currentState ? "on" : "off";
-            const image = button.querySelector("img");
-            if (image) {
-              image.src = currentState ? "SSROn.jpg" : "SSR.jpg";
-            }
+            updateSsrToggleUi(ssrId, currentState);
           } finally {
             clearSsrToggle(ssrId, button);
           }
         })();
+      }
+
+      function updateSsrToggleUi(ssrId, isOn) {
+        if (!ssrId) {
+          return;
+        }
+        const selector = `button[data-action="toggle-ssr"][data-ssr-id="${cssEscapeId(ssrId)}"]`;
+        document.querySelectorAll(selector).forEach((button) => {
+          button.dataset.currentState = isOn ? "on" : "off";
+          const image = button.querySelector("img");
+          if (image) {
+            image.src = isOn ? "SSROn.jpg" : "SSR.jpg";
+          }
+          if (button.classList.contains("ssr-toggle-button")) {
+            button.textContent = isOn ? "Turn Off" : "Turn On";
+          }
+        });
       }
 
       function disableSsrToggle(ssrId, element) {
@@ -1824,11 +1918,14 @@ let pendingSwitchSelectKey = null;
         const timeout = setTimeout(() => clearSsrToggle(ssrId), 5000);
         pendingSsrToggles.set(ssrId, { timer: timeout });
         const selector = `button[data-action="toggle-ssr"][data-ssr-id="${cssEscapeId(ssrId)}"]`;
-        const button = element || document.querySelector(selector);
-        if (button) {
+        if (element) {
+          element.disabled = true;
+          element.classList.add("disabled");
+        }
+        document.querySelectorAll(selector).forEach((button) => {
           button.disabled = true;
           button.classList.add("disabled");
-        }
+        });
       }
 
       function clearSsrToggle(ssrId, element) {
@@ -1841,11 +1938,14 @@ let pendingSwitchSelectKey = null;
         }
         pendingSsrToggles.delete(ssrId);
         const selector = `button[data-action="toggle-ssr"][data-ssr-id="${cssEscapeId(ssrId)}"]`;
-        const button = element || document.querySelector(selector);
-        if (button) {
+        if (element) {
+          element.disabled = false;
+          element.classList.remove("disabled");
+        }
+        document.querySelectorAll(selector).forEach((button) => {
           button.disabled = false;
           button.classList.remove("disabled");
-        }
+        });
       }
 
       function getAvailableSsrBits(currentBit) {
@@ -1857,15 +1957,10 @@ let pendingSwitchSelectKey = null;
         if (Number.isInteger(currentBit)) {
           used.delete(Number(currentBit));
         }
-        const bits = [];
-        for (let bit = 0; bit < SSR_MAX_ENTRIES; bit += 1) {
-        if (!used.has(bit)) {
-          bits.push(bit);
+        const bits = SSR_BIT_CHOICES.filter((bit) => !used.has(bit));
+        if (!bits.length && Number.isInteger(currentBit)) {
+          bits.push(Number(currentBit));
         }
-      }
-      if (!bits.length && Number.isInteger(currentBit)) {
-        bits.push(Number(currentBit));
-      }
         return bits;
       }
 
@@ -3360,6 +3455,7 @@ function findSwitchByKey(key) {
           metadata: {},
           polling_enabled: false,
           has_can_interface: false,
+          can_sender_id: null,
         };
         addDraft("controllers", draft);
         renderAll();
@@ -3538,6 +3634,18 @@ function readControllerCard(card) {
         const canField = card.querySelector('[data-field="has_can_interface"]');
         if (canField && !canField.disabled) {
           payload.has_can_interface = Boolean(canField.checked);
+        }
+        const senderField = card.querySelector('[data-field="can_sender_id"]');
+        if (senderField) {
+          const senderValue = senderField.value.trim();
+          if (senderValue) {
+            const parsed = Number(senderValue);
+            if (Number.isFinite(parsed)) {
+              payload.can_sender_id = parsed;
+            }
+          } else {
+            payload.can_sender_id = null;
+          }
         }
         return payload;
       }

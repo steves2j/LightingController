@@ -9,3 +9,4 @@ export const SWITCH_MASK_CHOICES = [
 export const AUTO_REFRESH_INTERVAL = 5000;
 
 export const SSR_MAX_ENTRIES = 10;
+export const SSR_BIT_CHOICES = [1, 4, 64, 128, 512, 1024, 2048, 8192, 16384, 32768];

@@ -90,6 +90,10 @@ export function importRegistry(entryId, snapshot) {
   return apiRequest("POST", `/api/s2j_led_driver/${entryId}/registry`, snapshot);
 }
 
+export function clearRegistryMetadata(entryId) {
+  return apiRequest("POST", `/api/s2j_led_driver/${entryId}/registry/metadata/clear`);
+}
+
 export function sendGroupCommand(entryId, groupId, turnOn) {
   return apiRequest("POST", `/api/s2j_led_driver/${entryId}/command`, {
     command: "set_group",

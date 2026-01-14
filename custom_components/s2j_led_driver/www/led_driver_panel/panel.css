@@ -731,6 +731,26 @@ button.secondary {
   justify-content: flex-end;
 }
 
+.controller-serial-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.controller-serial-error {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.2rem;
+  height: 1.2rem;
+  border-radius: 9999px;
+  background: rgba(248, 113, 113, 0.2);
+  color: #f87171;
+  font-weight: 700;
+  font-size: 0.75rem;
+}
+
 .group-def-actions-header,
 .driver-actions-header,
 .ssr-actions-header {

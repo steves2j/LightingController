@@ -34,6 +34,7 @@ async def async_register_http_views(hass: HomeAssistant) -> None:
     hass.http.register_view(LedDriverRegistryButtonsView(hass))
     hass.http.register_view(LedDriverRegistryButtonsDeleteView(hass))
     hass.http.register_view(LedDriverRegistryLearnedButtonsDeleteView(hass))
+    hass.http.register_view(LedDriverRegistryMetadataClearView(hass))
     hass.http.register_view(LedDriverRegistrySsrBaseView(hass))
     hass.http.register_view(LedDriverRegistrySsrEntriesView(hass))
     hass.http.register_view(LedDriverRegistrySsrEntriesDeleteView(hass))
@@ -240,7 +241,15 @@ class LedDriverRegistryView(LedDriverBaseView):
     async def get(self, request: web.Request, entry_id: str) -> web.Response:
         entry_data = self._resolve_entry(entry_id)
         registry = entry_data["registry"]
-        return web.json_response(serialize_registry_snapshot(registry))
+        snapshot = serialize_registry_snapshot(registry)
+        manager = entry_data.get("manager")
+        if manager is not None:
+            serial_status = manager.get_controller_serial_status()
+            for controller in snapshot.get("controllers", []):
+                controller_id = controller.get("id")
+                if controller_id in serial_status:
+                    controller["serial_status"] = serial_status[controller_id]
+        return web.json_response(snapshot)
 
     async def post(self, request: web.Request, entry_id: str) -> web.Response:
         """Replace the registry with an uploaded snapshot."""
@@ -251,6 +260,19 @@ class LedDriverRegistryView(LedDriverBaseView):
             await registry.async_import_snapshot(payload)
         except ValueError as err:
             raise web.HTTPBadRequest(text=str(err)) from err
+        return web.json_response({"status": "ok"})
+
+
+class LedDriverRegistryMetadataClearView(LedDriverBaseView):
+    """Clear stored metadata for registry entities."""
+
+    url = "/api/s2j_led_driver/{entry_id}/registry/metadata/clear"
+    name = "api:s2j_led_driver:registry:metadata:clear"
+
+    async def post(self, request: web.Request, entry_id: str) -> web.Response:
+        entry_data = self._resolve_entry(entry_id)
+        registry = entry_data["registry"]
+        await registry.async_clear_metadata()
         return web.json_response({"status": "ok"})
 
 
