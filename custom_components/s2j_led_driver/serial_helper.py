@@ -105,7 +105,10 @@ class SerialHelper:
 
     async def async_send(self, line: str) -> None:
         """Enqueue a command line for transmission."""
+        queue_size = self._write_queue.qsize()
+        _LOGGER.debug("SerialHelper enqueue TX (size=%s): %s", queue_size, line.rstrip())
         await self._write_queue.put(line)
+        _LOGGER.debug("SerialHelper queued TX (size=%s): %s", self._write_queue.qsize(), line.rstrip())
 
     def _ensure_reader(self) -> None:
         if self._reader is None or self._reader_task is not None:
@@ -160,6 +163,7 @@ class SerialHelper:
             try:
                 while True:
                     line = await self._write_queue.get()
+                    _LOGGER.debug("SerialHelper dequeued TX (size=%s): %s", self._write_queue.qsize(), line.rstrip())
                     if self._writer is None:
                         _LOGGER.debug("Writer loop received data after disconnect")
                         break
@@ -168,6 +172,7 @@ class SerialHelper:
                     self._writer.write(payload)
                     try:
                         await self._writer.drain()
+                        _LOGGER.debug("SerialHelper TX drain ok (size=%s)", self._write_queue.qsize())
                     except serial.SerialException as err:
                         _LOGGER.error("SerialHelper write failed: %s", err)
                         await self._handle_serial_failure(err)
