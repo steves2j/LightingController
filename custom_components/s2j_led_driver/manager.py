@@ -528,8 +528,23 @@ class LedDriverManager:
                 channels = [slot_index]
         if controller_id is None or driver_index is None or not channels:
             raise LedDriverError("Output is missing controller/driver/channel mapping")
-        
-        target_pwm = int(output.get("target_pwm", output.get("max_pwm", 255)))
+
+        try:
+            min_pwm = int(output.get("min_pwm", 0))
+        except (TypeError, ValueError):
+            min_pwm = 0
+        try:
+            max_pwm = int(output.get("max_pwm", 255))
+        except (TypeError, ValueError):
+            max_pwm = 255
+        if max_pwm < min_pwm:
+            max_pwm = min_pwm
+
+        try:
+            target_pwm = int(output.get("target_pwm", max_pwm))
+        except (TypeError, ValueError):
+            target_pwm = max_pwm
+        target_pwm = max(min_pwm, min(max_pwm, target_pwm))
 
         responses: dict[str, Any] = {}
         if turn_on:
