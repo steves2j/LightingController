@@ -588,6 +588,7 @@ class LedDriverManager:
             responses[controller_id] = {"status": "queued"}
         except (ValueError, SerialHelperError) as err:
             raise LedDriverError(str(err)) from err
+        await asyncio.sleep(0)
 
         # Update local state
         output["pwm"] = pwm_value
