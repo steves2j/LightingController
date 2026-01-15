@@ -582,13 +582,15 @@ class LedDriverManager:
             }
             pwm_value = 0
 
-        await self._registry.async_append_serial_log(controller_id, direction="tx", payload=message)
         try:
             await self._json_helper.async_send(controller_id, message)
             responses[controller_id] = {"status": "queued"}
         except (ValueError, SerialHelperError) as err:
             raise LedDriverError(str(err)) from err
         await asyncio.sleep(0)
+        self._hass.async_create_task(
+            self._registry.async_append_serial_log(controller_id, direction="tx", payload=message)
+        )
 
         # Update local state
         output["pwm"] = pwm_value
