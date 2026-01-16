@@ -221,13 +221,13 @@ class LedDriverManager:
 
     def _on_status_message(self, controller_id: str, message: dict[str, Any]) -> None:
         async def _handle() -> None:
-            await self._registry.async_append_serial_log(controller_id, direction="rx", payload=message)
+            self._queue_serial_log(controller_id, direction="rx", payload=message)
             await self._handle_status_response(controller_id, message)
 
         self._hass.async_create_task(_handle())
 
     async def _process_led_channel_state(self, controller_id: str, message: dict[str, Any]) -> None:
-        await self._registry.async_append_serial_log(controller_id, direction="rx", payload=message)
+        self._queue_serial_log(controller_id, direction="rx", payload=message)
         changed_output_ids = self._apply_channel_state_event(controller_id, message)
         if not changed_output_ids:
             return
@@ -245,7 +245,7 @@ class LedDriverManager:
         message: dict[str, Any],
         is_fault: bool,
     ) -> None:
-        await self._registry.async_append_serial_log(controller_id, direction="rx", payload=message)
+        self._queue_serial_log(controller_id, direction="rx", payload=message)
         changed_output_ids = self._apply_fault_event(controller_id, message, is_fault)
         if not changed_output_ids:
             return
@@ -258,7 +258,7 @@ class LedDriverManager:
             _LOGGER.exception("Failed to commit registry updates from fault event")
 
     async def _process_button_event(self, controller_id: str, message: dict[str, Any]) -> None:
-        await self._registry.async_append_serial_log(controller_id, direction="rx", payload=message)
+        self._queue_serial_log(controller_id, direction="rx", payload=message)
         await self._handle_button_event(controller_id, message)
 
     def _get_can_controller_id(self) -> str:
@@ -284,6 +284,11 @@ class LedDriverManager:
                         return "0"
                     return str(sender_id)
         return "0"
+
+    def _queue_serial_log(self, controller_id: str, *, direction: str, payload: Any) -> None:
+        self._hass.async_create_task(
+            self._registry.async_append_serial_log(controller_id, direction=direction, payload=payload)
+        )
 
     async def async_apply_group_action(self, group_id: str, action: str) -> dict[str, Any]:
         """Turn a group on/off and propagate to controllers."""
@@ -313,7 +318,7 @@ class LedDriverManager:
                         for driver_idx, channels in sorted(drivers.items())
                     ],
                 }
-                await self._registry.async_append_serial_log(controller_id, direction="tx", payload=message)
+                self._queue_serial_log(controller_id, direction="tx", payload=message)
                 try:
                     await self._json_helper.async_send(controller_id, message)
                     responses[controller_id] = {"status": "queued"}
@@ -346,7 +351,7 @@ class LedDriverManager:
                     for driver_idx, slots in sorted(drivers.items())
                 ],
             }
-            await self._registry.async_append_serial_log(controller_id, direction="tx", payload=message)
+            self._queue_serial_log(controller_id, direction="tx", payload=message)
             try:
                 await self._json_helper.async_send(controller_id, message)
                 responses[controller_id] = {"status": "queued"}
@@ -588,9 +593,7 @@ class LedDriverManager:
         except (ValueError, SerialHelperError) as err:
             raise LedDriverError(str(err)) from err
         await asyncio.sleep(0)
-        self._hass.async_create_task(
-            self._registry.async_append_serial_log(controller_id, direction="tx", payload=message)
-        )
+        self._queue_serial_log(controller_id, direction="tx", payload=message)
 
         # Update local state
         output["pwm"] = pwm_value
@@ -651,7 +654,7 @@ class LedDriverManager:
             mask,
             can_controller_id,
         )
-        await self._registry.async_append_serial_log(can_controller_id, direction="tx", payload=message)
+        self._queue_serial_log(can_controller_id, direction="tx", payload=message)
         try:
             await self._json_helper.async_send(can_controller_id, message)
         except (ValueError, SerialHelperError) as err:
@@ -703,7 +706,7 @@ class LedDriverManager:
                 "ch": current_high,
             }
 
-            await self._registry.async_append_serial_log(controller_id, direction="tx", payload=message)
+            self._queue_serial_log(controller_id, direction="tx", payload=message)
             try:
                 await self._json_helper.async_send(controller_id, message)
             except (ValueError, SerialHelperError) as err:
@@ -970,7 +973,7 @@ class LedDriverManager:
     async def _handle_status_response(self, controller_id: str, response: dict[str, Any]) -> None:
         if not isinstance(response, dict):
             return
-        await self._registry.async_append_serial_log(controller_id, direction="rx", payload=response)
+        self._queue_serial_log(controller_id, direction="rx", payload=response)
         if _get(response, "t", "type") != "status":
             return
 
@@ -1399,7 +1402,7 @@ class LedDriverManager:
                     "pwm": pwm,
                 }
                 try:
-                    await self._registry.async_append_serial_log(controller_id, direction="tx", payload=message)
+                    self._queue_serial_log(controller_id, direction="tx", payload=message)
                     await self._json_helper.async_send(controller_id, message)
                     controller_responses[pwm] = "queued"
                     _LOGGER.debug(
@@ -1428,7 +1431,7 @@ class LedDriverManager:
                     if controller_id in self._serial_helpers:
                         message = {"cm": "status"}
                         try:
-                            await self._registry.async_append_serial_log(controller_id, direction="tx", payload=message)
+                            self._queue_serial_log(controller_id, direction="tx", payload=message)
                             await self._json_helper.async_send(controller_id, message)
                         except (ValueError, SerialHelperError) as err:
                             _LOGGER.debug("Controller %s status poll failed: %s", controller_id, err)
