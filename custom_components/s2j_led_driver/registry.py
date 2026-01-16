@@ -17,6 +17,7 @@ STORAGE_KEY = "s2j_led_driver_registry"
 STORAGE_VERSION = 1
 STORAGE_META_KEY = "s2j_led_driver_registry_meta"
 STORAGE_META_VERSION = 1
+SERIAL_LOG_SAVE_DELAY = 0.5
 
 TOTAL_OUTPUTS_PER_DRIVER = 4
 SSR_MAX_ENTRIES = 10
@@ -137,6 +138,7 @@ class LedRegistry:
     """Manage persisted controller, driver, and group definitions."""
 
     def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
         self._store = Store[dict[str, Any]](hass, STORAGE_VERSION, STORAGE_KEY)
         self._meta_store = Store[dict[str, Any]](hass, STORAGE_META_VERSION, STORAGE_META_KEY)
         self._data: dict[str, dict[str, Any]] = {
@@ -163,6 +165,7 @@ class LedRegistry:
         }
         self._listeners: list[RegistryListener] = []
         self._save_lock = asyncio.Lock()
+        self._serial_log_handle: asyncio.TimerHandle | None = None
 
     # General persistence helpers -------------------------------------------------
 
@@ -757,7 +760,20 @@ class LedRegistry:
         metadata["serial_log"] = log
         if controller is not None:
             controller["metadata"] = metadata
-        await self.async_commit()
+        self._schedule_serial_log_save()
+
+    def _schedule_serial_log_save(self) -> None:
+        if self._serial_log_handle is not None:
+            return
+        loop = self._hass.loop
+        self._serial_log_handle = loop.call_later(
+            SERIAL_LOG_SAVE_DELAY,
+            self._flush_serial_logs,
+        )
+
+    def _flush_serial_logs(self) -> None:
+        self._serial_log_handle = None
+        self._hass.async_create_task(self.async_save())
 
     async def async_record_learned_switch(
         self,

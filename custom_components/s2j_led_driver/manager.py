@@ -217,6 +217,11 @@ class LedDriverManager:
         self._hass.async_create_task(self._process_led_fault(controller_id, message, False))
 
     def _on_can_message(self, controller_id: str, message: dict[str, Any]) -> None:
+        _LOGGER.debug(
+            "Queueing CAN message handler controller=%s now=%.3f",
+            controller_id,
+            monotonic(),
+        )
         self._hass.async_create_task(self._process_button_event(controller_id, message))
 
     def _on_status_message(self, controller_id: str, message: dict[str, Any]) -> None:
@@ -258,6 +263,11 @@ class LedDriverManager:
             _LOGGER.exception("Failed to commit registry updates from fault event")
 
     async def _process_button_event(self, controller_id: str, message: dict[str, Any]) -> None:
+        _LOGGER.debug(
+            "CAN message handler start controller=%s now=%.3f",
+            controller_id,
+            monotonic(),
+        )
         self._queue_serial_log(controller_id, direction="rx", payload=message)
         await self._handle_button_event(controller_id, message)
 

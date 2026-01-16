@@ -60,7 +60,17 @@ class JsonHelper:
                 while True:
                     queue = helper.read_queue
                     try:
+                        loop = asyncio.get_running_loop()
+                        start = loop.time()
                         line = await asyncio.wait_for(queue.get(), timeout=1.0)
+                        elapsed = loop.time() - start
+                        if elapsed > 0.25:
+                            _LOGGER.debug(
+                                "JsonHelper dequeue delay %.3fs helper=%s queue=%s",
+                                elapsed,
+                                name,
+                                queue.qsize(),
+                            )
                     except asyncio.TimeoutError:
                         continue
                     except asyncio.CancelledError:
@@ -89,6 +99,12 @@ class JsonHelper:
                     if not callbacks:
                         continue
 
+                    _LOGGER.debug(
+                        "JsonHelper dispatch helper=%s event=%s callbacks=%s",
+                        name,
+                        event,
+                        len(callbacks),
+                    )
                     for callback in list(callbacks):
                         try:
                             result = callback(name, message)
