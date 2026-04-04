@@ -76,8 +76,8 @@ class LedDriverSensorBase(CoordinatorEntity):
         return DeviceInfo(
             identifiers={(DOMAIN, self._entry.entry_id)},
             name="LED Driver",
-            manufacturer="Example",
-            model="JSON LED Driver",
+            manufacturer="S2J",
+            model="LED Driver Controller",
         )
 
 

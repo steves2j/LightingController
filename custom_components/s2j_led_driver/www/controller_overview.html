@@ -467,10 +467,8 @@
       function applyStateChangeFromEvent(event) {
         const newState = event?.data?.new_state;
         if (!newState) return false;
-        console.log("Applying state change for", newState.entity_id);
         const attrs = newState.attributes || {};
         const groupId = attrs.group_id;
-        console.log("Group ID:", groupId);
         if (!groupId) return false;
         const isOn = newState.state === "on" || !!attrs.is_on;
         let brightness = attrs.brightness;
@@ -480,13 +478,11 @@
           brightness = Math.max(0, Math.min(100, Number(brightness)));
         }
         const updates = { is_on: isOn };
-        console.log("Updating group", groupId, "is_on =", isOn, "brightness =", brightness);
         if (brightness !== undefined) {
           updates.brightness = brightness;
         }
         upsertGroupPartial(groupId, updates);
         renderSwitchButtons(switchSelect.value || null);
-        console.log("Redered switch buttons after state change");
         if (lastActiveGroupId === groupId) {
           setActiveGroup(groupId);
         }
@@ -511,6 +507,54 @@
         if (lastActiveGroupId === data.group_id) {
           setActiveGroup(data.group_id);
         }
+        renderLedMatrix();
+        return true;
+      }
+
+      function findOutputRecord(outputId) {
+        if (!outputId) return null;
+        return buildOutputIndex().get(outputId) || null;
+      }
+
+      function computeOutputLevel(output, pwm) {
+        const min = Number(output?.min_pwm ?? 0) || 0;
+        return Number(pwm) > min ? 1 : 0;
+      }
+
+      function applyOutputPartial(update) {
+        const outputId = update?.output_id;
+        const record = findOutputRecord(outputId);
+        if (!record) {
+          return false;
+        }
+
+        const { output } = record;
+        let changed = false;
+        ["level", "pwm", "target_pwm", "faulty", "disabled", "active_group_id"].forEach((key) => {
+          if (update[key] === undefined) {
+            return;
+          }
+          if (output[key] !== update[key]) {
+            output[key] = update[key];
+            changed = true;
+          }
+        });
+        return changed;
+      }
+
+      function applyOutputBusEvent(data) {
+        const outputs = Array.isArray(data?.outputs) ? data.outputs : [];
+        if (!outputs.length) {
+          return false;
+        }
+        let changed = false;
+        outputs.forEach((entry) => {
+          changed = applyOutputPartial(entry) || changed;
+        });
+        if (!changed) {
+          return true;
+        }
+        renderControllers();
         renderLedMatrix();
         return true;
       }
@@ -567,7 +611,6 @@
 
       function renderSwitchButtons(selectedValue) {
         if (!switchButtonLayer) {
-          console.log("No switch button layer");
           return;
         }
         switchButtonLayer.innerHTML = "";
@@ -704,21 +747,22 @@
           .join("");
       }
 
-      let refreshTimer = null;
-      const REFRESH_INTERVAL_MS = 5000;
-      let wsUnsubs = [];
-      const toggleRefreshEl = document.getElementById("toggle-refresh");
-      const manualRefreshEl = document.getElementById("manual-refresh");
-      const HOLD_MS = 350;
-      const DBL_MS = 250;
+	      let refreshTimer = null;
+	      let refreshInFlight = false;
+	      let queuedRefresh = false;
+	      const REFRESH_INTERVAL_MS = 30000;
+	      let wsUnsubs = [];
+	      const toggleRefreshEl = document.getElementById("toggle-refresh");
+	      const manualRefreshEl = document.getElementById("manual-refresh");
+	      const HOLD_MS = 250;
+	      const DBL_MS = 140;
 
-      function scheduleRefresh() {
-        if (refreshTimer !== null) {
-          console.log("Clearing existing refresh timer");
-          clearInterval(refreshTimer);
-          refreshTimer = null;
-        }
-        if (toggleRefreshEl && !toggleRefreshEl.checked) {
+	      function scheduleRefresh() {
+	        if (refreshTimer !== null) {
+	          clearInterval(refreshTimer);
+	          refreshTimer = null;
+	        }
+	        if (toggleRefreshEl && !toggleRefreshEl.checked) {
           return;
         }
         refreshTimer = setInterval(() => {
@@ -729,29 +773,38 @@
         }, REFRESH_INTERVAL_MS);
       }
 
-      async function refreshData() {
-        if (!state.entryId) {
-          return;
-        }
-        try {
-          const registry = await callApi("get", `/api/s2j_led_driver/${state.entryId}/registry`);
-          state.controllers = registry.controllers || [];
-          state.drivers = registry.drivers || [];
-          state.switches = registry.switches || [];
-          state.groups = registry.groups || [];
-          state.buttons = registry.buttons || [];
-          renderSwitchDropdown();
-          renderControllers();
-          renderSwitchButtons(switchSelect.value || null);
-          renderLedMatrix();
-          if (lastActiveGroupId) {
-            setActiveGroup(lastActiveGroupId);
-          }
-        } catch (error) {
-          console.error(error);
-          statusEl.textContent = error.message || "Failed to refresh controller data.";
-        }
-      }
+	      async function refreshData() {
+	        if (!state.entryId) {
+	          return;
+	        }
+	        if (refreshInFlight) {
+	          queuedRefresh = true;
+	          return;
+	        }
+	        refreshInFlight = true;
+	        try {
+	          const registry = await callApi("get", `/api/s2j_led_driver/${state.entryId}/registry`);
+	          state.controllers = registry.controllers || [];
+	          state.drivers = registry.drivers || [];
+	          state.switches = registry.switches || [];
+	          state.groups = registry.groups || [];
+	          state.buttons = registry.buttons || [];
+	          renderSwitchDropdown();
+	          renderControllers();
+	          if (lastActiveGroupId) {
+	            setActiveGroup(lastActiveGroupId);
+	          }
+	        } catch (error) {
+	          console.error(error);
+	          statusEl.textContent = error.message || "Failed to refresh controller data.";
+	        } finally {
+	          refreshInFlight = false;
+	          if (queuedRefresh) {
+	            queuedRefresh = false;
+	            void refreshData();
+	          }
+	        }
+	      }
 
       function buildLedEntries() {
         const groupMap = new Map();
@@ -786,23 +839,43 @@
               groups,
               min_pwm: output.min_pwm,
               max_pwm: output.max_pwm,
-              pwm: output.target_pwm,
+              pwm: output.pwm,
             });
           });
         });
         return entries;
       }
 
-      async function toggleLed(entry) {
-        if (!entry?.id) return;
-        try {
-          await sendOutputState(entry.id, !entry.on);
-          entry.on = !entry.on;
-          renderLedMatrix();
-        } catch (error) {
-          console.error("Failed to toggle LED", entry.id, error);
-        }
-      }
+	      async function toggleLed(entry) {
+	        if (!entry?.id) return;
+	        const record = findOutputRecord(entry.id);
+	        if (!record) return;
+	        const { output } = record;
+	        const nextOn = !entry.on;
+	        const nextPwm = nextOn
+	          ? resolveGroupTargetForOutput(output, output.active_group_id) || Number(output.target_pwm ?? output.pwm ?? output.max_pwm ?? 255) || 0
+	          : (() => {
+	              const min = Number(output.min_pwm ?? 0) || 0;
+	              return min === 0 ? 0 : min;
+	            })();
+	        const previousState = {
+	          pwm: output.pwm,
+	          level: output.level,
+	        };
+	        try {
+	          output.pwm = nextPwm;
+	          output.level = nextOn ? computeOutputLevel(output, nextPwm) : 0;
+	          renderLedMatrix();
+	          renderControllers();
+	          await sendOutputState(entry.id, nextOn);
+	        } catch (error) {
+	          output.pwm = previousState.pwm;
+	          output.level = previousState.level;
+	          renderLedMatrix();
+	          renderControllers();
+	          console.error("Failed to toggle LED", entry.id, error);
+	        }
+	      }
 
       function renderLedMatrix() {
         if (!ledGrid) return;
@@ -811,7 +884,7 @@
           ledGrid.innerHTML = "<p style=\"margin:0;color:rgba(229,231,235,0.7)\">No LEDs detected.</p>";
           return;
         }
-        const dots = entries
+	        const dots = entries
           .map((entry) => {
             const cls = ["led-dot"];
             if (entry.faulty) {
@@ -822,26 +895,20 @@
             const groups = entry.groups.join(", ") || "No group";
             const tooltip = `${entry.name}\nGroups: ${groups}`;
             return `<div class="${cls.join(" ")}" data-output="${entry.id}" data-tooltip="${tooltip.replace(/"/g, "&quot;")}"></div>`;
-          })
-          .join("");
-        ledGrid.innerHTML = dots;
-        ledGrid.querySelectorAll(".led-dot").forEach((dot, index) => {
-          const entry = entries[index];
-          dot.addEventListener("click", () => toggleLed(entry));
-        });
-      }
+	          })
+	          .join("");
+	        ledGrid.innerHTML = dots;
+	      }
 
-      if (toggleRefreshEl){
-        toggleRefreshEl.addEventListener("change", () => {
-          console.log("Auto refresh toggled:", toggleRefreshEl.checked);
-          if (toggleRefreshEl.checked) {
-            scheduleRefresh();
-          } else if (refreshTimer !== null) {
-            console.log("Clearing existing refresh timer due to disable");
-            clearInterval(refreshTimer);
-            refreshTimer = null;
-          }
-        });
+	      if (toggleRefreshEl){
+	        toggleRefreshEl.addEventListener("change", () => {
+	          if (toggleRefreshEl.checked) {
+	            scheduleRefresh();
+	          } else if (refreshTimer !== null) {
+	            clearInterval(refreshTimer);
+	            refreshTimer = null;
+	          }
+	        });
       }
 
       if (manualRefreshEl) {
@@ -866,10 +933,10 @@
         renderLedMatrix();
       }
 
-      async function loadData() {
-        try {
-          statusEl.textContent = "Loading…";
-          await waitForHass();
+	      async function loadData() {
+	        try {
+	          statusEl.textContent = "Loading…";
+	          await waitForHass();
           await fetchRegistry();
           renderSwitchDropdown();
           renderSwitchButtons(switchSelect.value || null);
@@ -885,11 +952,28 @@
         }
       }
 
-      document.addEventListener("visibilitychange", () => {
-        if (!document.hidden) {
-          refreshData();
-        }
-      });
+	      document.addEventListener("visibilitychange", () => {
+	        if (!document.hidden) {
+	          void refreshData();
+	        }
+	      });
+
+	      if (ledGrid) {
+	        ledGrid.addEventListener("click", (event) => {
+	          const dot = event.target.closest(".led-dot[data-output]");
+	          if (!dot) {
+	            return;
+	          }
+	          const record = findOutputRecord(dot.dataset.output);
+	          if (!record) {
+	            return;
+	          }
+	          void toggleLed({
+	            id: dot.dataset.output,
+	            on: Number(record.output.level || 0) > 0,
+	          });
+	        });
+	      }
 
       if (switchSelect) {
         switchSelect.addEventListener("change", (event) => {
@@ -906,24 +990,22 @@
           }
           const unsubState = connection.subscribeEvents((event) => {
             const entityId = event?.data?.entity_id;
-            console.debug("LED driver overview: websocket event", event);
-            if (typeof entityId === "string" && entityId.includes("s2j_led_driver")) {
-              const applied = applyStateChangeFromEvent(event);
-              if (!applied) {
-                refreshData().catch((err) => console.error("LED driver overview: refresh failed", err));
-              }
-            } else {
-              console.debug("LED driver overview: ignoring unrelated event for", entityId);
+            const attrs = event?.data?.new_state?.attributes || {};
+            if (
+              typeof entityId === "string" &&
+              entityId.includes("s2j_led_driver") &&
+              attrs.group_id
+            ) {
+              applyStateChangeFromEvent(event);
             }
           }, "state_changed");
-          const unsubCustom = connection.subscribeEvents((event) => {
-            console.debug("LED driver overview: custom event", event);
-            if (!applyGroupBusEvent(event?.data)) {
-              refreshData().catch((err) => console.error("LED driver overview: refresh failed", err));
-            }
+          const unsubGroup = connection.subscribeEvents((event) => {
+            applyGroupBusEvent(event?.data);
           }, "s2j_led_driver_group_state");
-          wsUnsubs = [unsubState, unsubCustom];
-          console.debug("LED driver overview: WebSocket subscription active");
+          const unsubOutput = connection.subscribeEvents((event) => {
+            applyOutputBusEvent(event?.data);
+          }, "s2j_led_driver_output_state");
+          wsUnsubs = [unsubState, unsubGroup, unsubOutput];
         } catch (error) {
           console.debug("LED driver overview: failed to start WebSocket subscription", error);
         }
@@ -968,6 +1050,105 @@
         return buttonInteractionState.get(key);
       }
 
+      function resolveGroupTargetForOutput(output, groupId) {
+        if (!output) return 0;
+        const groupTargets = output.group_targets;
+        if (groupId && groupTargets && typeof groupTargets === "object" && groupTargets[groupId] !== undefined) {
+          return Number(groupTargets[groupId]) || 0;
+        }
+        const minPwm = Number(output.min_pwm ?? 0) || 0;
+        const maxPwm = Number(output.max_pwm ?? 255) || 255;
+        const group = getGroupById(groupId);
+        const brightness = Math.max(0, Math.min(100, Number(group?.brightness ?? 0) || 0));
+        return Math.round(minPwm + Math.max(0, maxPwm - minPwm) * (brightness / 100));
+      }
+
+      function findFallbackGroupId(outputId, excludingGroupId) {
+        let match = null;
+        let bestOrder = -1;
+        (state.groups || []).forEach((group) => {
+          if (!group?.id || group.id === excludingGroupId || !group.is_on) {
+            return;
+          }
+          if (!(group.led_ids || []).includes(outputId)) {
+            return;
+          }
+          const order = Number(group.activation_order || 0) || 0;
+          if (order > bestOrder) {
+            bestOrder = order;
+            match = group.id;
+          }
+        });
+        return match;
+      }
+
+      function applyGroupTargetsLocally(groupId, targets, { turnOn = true } = {}) {
+        Object.entries(targets || {}).forEach(([outputId, pwm]) => {
+          const record = findOutputRecord(outputId);
+          if (!record) {
+            return;
+          }
+          const { output } = record;
+          output.target_pwm = pwm;
+          if (!turnOn) {
+            return;
+          }
+          output.pwm = pwm;
+          output.level = computeOutputLevel(output, pwm);
+          output.active_group_id = groupId;
+        });
+      }
+
+      function applyGroupActionLocally(groupId, action) {
+        const group = getGroupById(groupId);
+        if (!group) {
+          return;
+        }
+
+        if (action === "on") {
+          group.is_on = true;
+          group.activation_order = Date.now();
+          (group.led_ids || []).forEach((outputId) => {
+            const record = findOutputRecord(outputId);
+            if (!record || record.output.disabled) {
+              return;
+            }
+            const pwm = resolveGroupTargetForOutput(record.output, groupId);
+            record.output.target_pwm = pwm;
+            record.output.pwm = pwm;
+            record.output.level = computeOutputLevel(record.output, pwm);
+            record.output.active_group_id = groupId;
+          });
+        } else {
+          group.is_on = false;
+          (group.led_ids || []).forEach((outputId) => {
+            const record = findOutputRecord(outputId);
+            if (!record || record.output.disabled) {
+              return;
+            }
+            const fallbackGroupId = findFallbackGroupId(outputId, groupId);
+            if (fallbackGroupId) {
+              const fallbackPwm = resolveGroupTargetForOutput(record.output, fallbackGroupId);
+              record.output.pwm = fallbackPwm;
+              record.output.level = computeOutputLevel(record.output, fallbackPwm);
+              record.output.active_group_id = fallbackGroupId;
+              return;
+            }
+            const minPwm = Number(record.output.min_pwm ?? 0) || 0;
+            record.output.pwm = minPwm === 0 ? 0 : minPwm;
+            record.output.level = 0;
+            record.output.active_group_id = null;
+          });
+        }
+
+        renderSwitchButtons(switchSelect.value || null);
+        renderLedMatrix();
+        renderControllers();
+        if (lastActiveGroupId === groupId || action === "on") {
+          setActiveGroup(groupId);
+        }
+      }
+
       async function applyGroupBrightness(groupId, pwmValue) {
         const outputs = getGroupOutputs(groupId);
         if (!outputs.length) return;
@@ -980,15 +1161,25 @@
           const pwm = Math.round(min_pwm + range * (brightness / 100));
           targets[out.id] = pwm;
         });
-        await sendGroupPwmTargets(groupId, targets, brightness);
+        applyGroupTargetsLocally(groupId, targets, { turnOn: Boolean(getGroupById(groupId)?.is_on) });
         const group = getGroupById(groupId);
         if (group) {
           group.brightness = brightness;
+          if (group.is_on) {
+            group.activation_order = Date.now();
+          }
+        }
+        renderLedMatrix();
+        renderControllers();
+        try {
+          await sendGroupPwmTargets(groupId, targets, brightness);
+        } catch (error) {
+          void refreshData();
+          throw error;
         }
       }
 
       async function sendGroupAction(groupId, action) {
-        console.debug("LED driver overview: sending group action", { groupId, action });
         await callApi(
           "post",
           `/api/s2j_led_driver/${state.entryId}/command`,
@@ -998,10 +1189,10 @@
             action,
           }
         );
+        applyGroupActionLocally(groupId, action);
       }
 
       async function sendGroupPwmTargets(groupId, targets, brightness) {
-        console.debug("LED driver overview: sending group PWM targets", { groupId, targets, brightness });
         await callApi(
           "post",
           `/api/s2j_led_driver/${state.entryId}/command`,
@@ -1015,7 +1206,6 @@
       }
 
       async function sendOutputPwm(outputId, pwm) {
-        console.debug("LED driver overview: sending output PWM", { outputId, pwm });
         await callApi(
           "post",
           `/api/s2j_led_driver/${state.entryId}/command`,
@@ -1028,7 +1218,6 @@
       }
 
       async function sendOutputState(outputId, turnOn) {
-        console.debug("LED driver overview: sending output state", { outputId, turnOn });
         await callApi(
           "post",
           `/api/s2j_led_driver/${state.entryId}/command`,
@@ -1046,7 +1235,6 @@
           return;
         }
         await sendGroupAction(groupId, "on");
-        await refreshData();
       }
 
       function computePwmStepTargets(groupId, direction) {
@@ -1082,7 +1270,15 @@
         if (!targets) {
           return false;
         }
-        await sendGroupPwmTargets(groupId, targets);
+        applyGroupTargetsLocally(groupId, targets, { turnOn: true });
+        renderLedMatrix();
+        renderControllers();
+        try {
+          await sendGroupPwmTargets(groupId, targets);
+        } catch (error) {
+          void refreshData();
+          throw error;
+        }
         return true;
       }
 

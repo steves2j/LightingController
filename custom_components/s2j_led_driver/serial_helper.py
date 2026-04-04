@@ -117,16 +117,7 @@ class SerialHelper:
         async def _reader_loop() -> None:
             try:
                 while True:
-                    # accumulate bytes until newline is received
-                    line = b""
-                    while True:
-                        chunk = await self._reader.read(1)
-                        if not chunk:
-                            break
-                        line += chunk
-                        #_LOGGER.debug("SerialHelper reader received chunk: %s", chunk)
-                        if chunk == b"\n":
-                            break
+                    line = await self._reader.readline()
                     if not line:
                         _LOGGER.debug("SerialHelper reader reached EOF")
                         await self._handle_serial_failure()

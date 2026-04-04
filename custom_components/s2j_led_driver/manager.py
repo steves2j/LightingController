@@ -28,6 +28,8 @@ _SWITCH_HOLD_THRESHOLD = 0.4
 _PWM_STEP_INTERVAL = 0.3
 _PWM_STEP_SIZE = 1
 _SSR_MASK = 0xFFFF
+_GROUP_STATE_EVENT = "s2j_led_driver_group_state"
+_OUTPUT_STATE_EVENT = "s2j_led_driver_output_state"
 
 
 @dataclass
@@ -110,6 +112,7 @@ class LedDriverManager:
         self._button_states: dict[tuple[int, int], _ButtonState] = {}
         self._switch_buttons: dict[int, list[_ButtonState]] = defaultdict(list)
         self._switch_masks: dict[int, int] = {}
+        self._activation_sequence = 0
 
     async def async_initialize(self) -> None:
         """Ensure serial clients exist for stored controllers."""
@@ -238,9 +241,10 @@ class LedDriverManager:
             return
         changed_groups = self._update_groups_from_output_ids(changed_output_ids)
         try:
-            await self._registry.async_commit()
+            await self._registry.async_commit(persist=False)
             if changed_groups:
                 await self._broadcast_group_updates(changed_groups)
+            await self._broadcast_output_updates(changed_output_ids)
         except Exception:  # pragma: no cover
             _LOGGER.exception("Failed to commit registry updates from controller event")
 
@@ -256,9 +260,10 @@ class LedDriverManager:
             return
         changed_groups = self._update_groups_from_output_ids(changed_output_ids)
         try:
-            await self._registry.async_commit()
+            await self._registry.async_commit(persist=False)
             if changed_groups:
                 await self._broadcast_group_updates(changed_groups)
+            await self._broadcast_output_updates(changed_output_ids)
         except Exception:  # pragma: no cover
             _LOGGER.exception("Failed to commit registry updates from fault event")
 
@@ -300,6 +305,203 @@ class LedDriverManager:
             self._registry.async_append_serial_log(controller_id, direction=direction, payload=payload)
         )
 
+    @staticmethod
+    def _iter_output_channels(output: dict[str, Any]) -> list[int]:
+        channels = list(output.get("channels") or [])
+        if not channels:
+            slot_index = _to_int(output.get("slot"))
+            if slot_index is not None:
+                channels = [slot_index]
+
+        resolved: list[int] = []
+        for channel in channels:
+            channel_idx = _to_int(channel)
+            if channel_idx is not None:
+                resolved.append(channel_idx)
+        return resolved
+
+    @staticmethod
+    def _get_output_pwm_bounds(output: dict[str, Any]) -> tuple[int, int]:
+        try:
+            min_pwm = int(output.get("min_pwm", 0))
+        except (TypeError, ValueError):
+            min_pwm = 0
+        try:
+            max_pwm = int(output.get("max_pwm", 255))
+        except (TypeError, ValueError):
+            max_pwm = 255
+        if max_pwm < min_pwm:
+            max_pwm = min_pwm
+        return min_pwm, max_pwm
+
+    def _clamp_output_pwm(self, output: dict[str, Any], pwm: Any) -> int:
+        min_pwm, max_pwm = self._get_output_pwm_bounds(output)
+        try:
+            value = int(pwm)
+        except (TypeError, ValueError):
+            value = max_pwm
+        return max(min_pwm, min(max_pwm, value))
+
+    def _resolve_output_target_pwm(
+        self,
+        output: dict[str, Any],
+        *,
+        group_id: str | None = None,
+        brightness: int | None = None,
+    ) -> int:
+        min_pwm, max_pwm = self._get_output_pwm_bounds(output)
+
+        if group_id:
+            group_targets = output.get("group_targets")
+            if isinstance(group_targets, dict):
+                group_target = _to_int(group_targets.get(group_id))
+                if group_target is not None:
+                    return max(min_pwm, min(max_pwm, group_target))
+
+            if brightness is None:
+                group = self._registry.get_group(group_id)
+                if group is not None:
+                    brightness = _to_int(group.get("brightness"))
+
+        if brightness is not None:
+            brightness_value = max(0, min(100, int(brightness)))
+            return int(min_pwm + (max_pwm - min_pwm) * (brightness_value / 100.0))
+
+        try:
+            target_pwm = int(output.get("target_pwm", max_pwm))
+        except (TypeError, ValueError):
+            target_pwm = max_pwm
+        return max(min_pwm, min(max_pwm, target_pwm))
+
+    def _set_output_group_target(self, output: dict[str, Any], group_id: str, pwm: int) -> bool:
+        group_targets = output.get("group_targets")
+        if not isinstance(group_targets, dict):
+            group_targets = {}
+        else:
+            group_targets = dict(group_targets)
+
+        if group_targets.get(group_id) == pwm:
+            return False
+
+        group_targets[group_id] = pwm
+        output["group_targets"] = group_targets
+        return True
+
+    def _set_output_runtime_state(
+        self,
+        output: dict[str, Any],
+        *,
+        pwm: int,
+        active_group_id: str | None,
+    ) -> bool:
+        changed = False
+        min_pwm, _ = self._get_output_pwm_bounds(output)
+        level = 1 if pwm > min_pwm else 0
+
+        if int(output.get("pwm", -1)) != pwm:
+            output["pwm"] = pwm
+            changed = True
+        if int(output.get("level", -1)) != level:
+            output["level"] = level
+            changed = True
+        if output.get("active_group_id") != active_group_id:
+            output["active_group_id"] = active_group_id
+            changed = True
+
+        return changed
+
+    def _mark_group_activated(self, group: dict[str, Any]) -> None:
+        self._activation_sequence += 1
+        group["activation_order"] = self._activation_sequence
+
+    def _select_fallback_group(self, output_id: str, *, excluding_group_id: str) -> str | None:
+        chosen_group_id: str | None = None
+        chosen_order = -1
+
+        for candidate_group_id in self._registry.get_group_ids_for_output(output_id):
+            if candidate_group_id == excluding_group_id:
+                continue
+            group = self._registry.get_group(candidate_group_id)
+            if group is None or not group.get("is_on"):
+                continue
+            order = _to_int(group.get("activation_order")) or 0
+            if order > chosen_order:
+                chosen_order = order
+                chosen_group_id = candidate_group_id
+
+        return chosen_group_id
+
+    async def _dispatch_group_channel_action(
+        self,
+        channel_map: dict[str, dict[int, list[int]]],
+        action: str,
+        *,
+        strict: bool = False,
+    ) -> dict[str, Any]:
+        responses: dict[str, Any] = {}
+        for controller_id, drivers in channel_map.items():
+            if controller_id not in self._serial_helpers:
+                message = f"Controller {controller_id} not connected"
+                if strict:
+                    raise LedDriverError(message)
+                _LOGGER.debug(message)
+                continue
+
+            message = {
+                "cm": "led",
+                "a": action,
+                "drvs": [
+                    {"drv": driver_idx, "cs": channels}
+                    for driver_idx, channels in sorted(drivers.items())
+                ],
+            }
+            self._queue_serial_log(controller_id, direction="tx", payload=message)
+            try:
+                await self._json_helper.async_send(controller_id, message)
+                responses[controller_id] = {"status": "queued"}
+            except (ValueError, SerialHelperError) as err:
+                if strict:
+                    raise LedDriverError(str(err)) from err
+                _LOGGER.debug("Controller %s %s update failed: %s", controller_id, action, err)
+        return responses
+
+    async def _dispatch_on_updates(
+        self,
+        updates: dict[str, dict[int, dict[int, int]]],
+        *,
+        strict: bool = False,
+    ) -> dict[str, Any]:
+        responses: dict[str, Any] = {}
+        for controller_id, driver_map in updates.items():
+            if controller_id not in self._serial_helpers:
+                message = f"Controller {controller_id} not connected"
+                if strict:
+                    raise LedDriverError(message)
+                _LOGGER.debug(message)
+                continue
+
+            message = {
+                "cm": "led",
+                "a": "on",
+                "drvs": [],
+            }
+            for driver_index, channels in sorted(driver_map.items()):
+                slots = [-1, -1, -1, -1]
+                for channel_index, pwm in channels.items():
+                    if 0 <= channel_index < len(slots):
+                        slots[channel_index] = pwm
+                message["drvs"].append({"drv": driver_index, "cs": slots})
+
+            self._queue_serial_log(controller_id, direction="tx", payload=message)
+            try:
+                await self._json_helper.async_send(controller_id, message)
+                responses[controller_id] = {"status": "queued"}
+            except (ValueError, SerialHelperError) as err:
+                if strict:
+                    raise LedDriverError(str(err)) from err
+                _LOGGER.debug("Controller %s on update failed: %s", controller_id, err)
+        return responses
+
     async def async_apply_group_action(self, group_id: str, action: str) -> dict[str, Any]:
         """Turn a group on/off and propagate to controllers."""
         _LOGGER.debug("Applying action %s to group %s", action, group_id)
@@ -307,69 +509,113 @@ class LedDriverManager:
         if registry_group is None:
             raise LedDriverError(f"Unknown group {group_id}")
 
-        responses: dict[str, Any] = {}
         action_lower = action.lower()
-        if action_lower == "off":
-            channel_map = self._registry.build_group_channel_map(
-                group_id,
-                include_faulty=True,
-            )
-            if not channel_map:
-                raise LedDriverError(f"No LEDs assigned to group {group_id}")
+        if action_lower not in {"on", "off"}:
+            raise LedDriverError(f"Unsupported action {action}")
 
-            for controller_id, drivers in channel_map.items():
-                if controller_id not in self._serial_helpers:
-                    raise LedDriverError(f"Controller {controller_id} not connected")
-                message = {
-                    "cm": "led",
-                    "a": action,
-                    "drvs": [
-                        {"drv": driver_idx, "cs": channels}
-                        for driver_idx, channels in sorted(drivers.items())
-                    ],
-                }
-                self._queue_serial_log(controller_id, direction="tx", payload=message)
-                try:
-                    await self._json_helper.async_send(controller_id, message)
-                    responses[controller_id] = {"status": "queued"}
-                except ValueError as err:
-                    raise LedDriverError(str(err)) from err
-                except SerialHelperError as err:
-                    raise LedDriverError(str(err)) from err
-            return responses
-
-        pwm_map = self._registry.build_group_pwm_map(
-            group_id,
-            include_disabled=True,
-            include_faulty=True,
-            brightness=registry_group.get("brightness"),
-        )
-        if not pwm_map:
+        resolved = self._registry.resolve_output_ids(registry_group.get("led_ids", []))
+        if not resolved:
             raise LedDriverError(f"No LEDs assigned to group {group_id}")
 
-        for controller_id, drivers in pwm_map.items():
-            if controller_id not in self._serial_helpers:
-                raise LedDriverError(f"Controller {controller_id} not connected")
-            message = {
-                "cm": "led",
-                "a": action,
-                "drvs": [
-                    {
-                        "drv": driver_idx,
-                        "cs": slots,
-                    }
-                    for driver_idx, slots in sorted(drivers.items())
-                ],
-            }
-            self._queue_serial_log(controller_id, direction="tx", payload=message)
-            try:
-                await self._json_helper.async_send(controller_id, message)
-                responses[controller_id] = {"status": "queued"}
-            except ValueError as err:
-                raise LedDriverError(str(err)) from err
-            except SerialHelperError as err:
-                raise LedDriverError(str(err)) from err
+        changed_output_ids: set[str] = set()
+        responses: dict[str, Any] = {}
 
+        if action_lower == "on":
+            updates: dict[str, dict[int, dict[int, int]]] = defaultdict(lambda: defaultdict(dict))
+            matched = False
+
+            for driver, output in resolved:
+                if output.get("disabled"):
+                    continue
+                channels = self._iter_output_channels(output)
+                if not channels:
+                    continue
+                controller_id = driver.get("controller_id")
+                driver_index = _to_int(driver.get("driver_index"))
+                if controller_id is None or driver_index is None:
+                    continue
+
+                pwm_value = self._resolve_output_target_pwm(
+                    output,
+                    group_id=group_id,
+                    brightness=_to_int(registry_group.get("brightness")),
+                )
+                for channel_index in channels:
+                    updates[controller_id][driver_index][channel_index] = pwm_value
+
+                matched = True
+                self._set_output_group_target(output, group_id, pwm_value)
+                if self._set_output_runtime_state(output, pwm=pwm_value, active_group_id=group_id):
+                    changed_output_ids.add(output["id"])
+
+            if not matched:
+                raise LedDriverError(f"No LEDs assigned to group {group_id}")
+
+            pwm_responses = await self._dispatch_pwm_updates(updates, strict=True)
+            on_responses = await self._dispatch_on_updates(updates, strict=True)
+            responses.update(pwm_responses)
+            responses.update(on_responses)
+
+            registry_group["is_on"] = True
+            self._mark_group_activated(registry_group)
+        else:
+            off_channels: dict[str, dict[int, list[int]]] = defaultdict(lambda: defaultdict(list))
+            fallback_updates: dict[str, dict[int, dict[int, int]]] = defaultdict(lambda: defaultdict(dict))
+            matched = False
+
+            for driver, output in resolved:
+                if output.get("disabled"):
+                    continue
+                channels = self._iter_output_channels(output)
+                if not channels:
+                    continue
+                controller_id = driver.get("controller_id")
+                driver_index = _to_int(driver.get("driver_index"))
+                if controller_id is None or driver_index is None:
+                    continue
+
+                matched = True
+                fallback_group_id = self._select_fallback_group(output["id"], excluding_group_id=group_id)
+                if fallback_group_id is not None:
+                    fallback_group = self._registry.get_group(fallback_group_id)
+                    pwm_value = self._resolve_output_target_pwm(
+                        output,
+                        group_id=fallback_group_id,
+                        brightness=_to_int(fallback_group.get("brightness")) if fallback_group else None,
+                    )
+                    for channel_index in channels:
+                        fallback_updates[controller_id][driver_index][channel_index] = pwm_value
+                    if self._set_output_runtime_state(output, pwm=pwm_value, active_group_id=fallback_group_id):
+                        changed_output_ids.add(output["id"])
+                else:
+                    for channel_index in channels:
+                        off_channels[controller_id][driver_index].append(channel_index)
+                    min_pwm, _ = self._get_output_pwm_bounds(output)
+                    off_pwm = 0 if min_pwm == 0 else min_pwm
+                    if self._set_output_runtime_state(output, pwm=off_pwm, active_group_id=None):
+                        changed_output_ids.add(output["id"])
+
+            if not matched:
+                raise LedDriverError(f"No LEDs assigned to group {group_id}")
+
+            if fallback_updates:
+                pwm_responses = await self._dispatch_pwm_updates(fallback_updates, strict=True)
+                on_responses = await self._dispatch_on_updates(fallback_updates, strict=True)
+                responses.update(pwm_responses)
+                responses.update(on_responses)
+            if off_channels:
+                off_responses = await self._dispatch_group_channel_action(off_channels, "off", strict=True)
+                responses.update(off_responses)
+
+            registry_group["is_on"] = False
+
+        changed_groups = {group_id}
+        changed_groups.update(self._update_groups_from_output_ids(changed_output_ids))
+        await self._registry.async_commit(persist=False)
+        if changed_groups:
+            await self._broadcast_group_updates(changed_groups)
+        if changed_output_ids:
+            await self._broadcast_output_updates(changed_output_ids)
         return responses
 
     async def async_apply_group_pwm_targets(
@@ -400,6 +646,8 @@ class LedDriverManager:
 
         updates: dict[str, dict[int, dict[int, int]]] = defaultdict(lambda: defaultdict(dict))
         matched = False
+        changed_output_ids: set[str] = set()
+        targets_changed = False
 
         for driver, output in resolved:
             output_id = output.get("id")
@@ -411,37 +659,25 @@ class LedDriverManager:
             pwm_value = _to_int(targets[output_id])
             if pwm_value is None:
                 continue
-
-            min_pwm = int(output.get("min_pwm", 0))
-            max_pwm = int(output.get("max_pwm", 255))
-            if max_pwm < min_pwm:
-                max_pwm = min_pwm
-            pwm_value = max(min_pwm, min(max_pwm, pwm_value))
+            pwm_value = self._clamp_output_pwm(output, pwm_value)
 
             controller_id = driver.get("controller_id")
             driver_index = _to_int(driver.get("driver_index", 0))
             if controller_id is None or driver_index is None:
                 continue
 
-            channels = output.get("channels") or []
-            if not channels:
-                slot_index = _to_int(output.get("slot"))
-                if slot_index is not None:
-                    channels = [slot_index]
-
-            channel_indices: list[int] = []
-            for channel in channels:
-                channel_index = _to_int(channel)
-                if channel_index is not None:
-                    channel_indices.append(channel_index)
-
+            channel_indices = self._iter_output_channels(output)
             if not channel_indices:
                 continue
 
             for channel_index in channel_indices:
                 updates[controller_id][driver_index][channel_index] = pwm_value
 
+            targets_changed = self._set_output_group_target(output, group_id, pwm_value) or targets_changed
             output["target_pwm"] = pwm_value
+            if registry_group.get("is_on"):
+                if self._set_output_runtime_state(output, pwm=pwm_value, active_group_id=group_id):
+                    changed_output_ids.add(output_id)
             matched = True
 
         if not matched:
@@ -462,9 +698,13 @@ class LedDriverManager:
                     registry_group["brightness"] = brightness_value
                     brightness_changed = True
 
-        await self._registry.async_commit()
-        if brightness_changed:
-            await self._broadcast_group_updates({group_id})
+        if registry_group.get("is_on"):
+            self._mark_group_activated(registry_group)
+
+        await self._registry.async_commit(persist=brightness_changed or targets_changed)
+        await self._broadcast_group_updates({group_id})
+        if changed_output_ids:
+            await self._broadcast_output_updates(changed_output_ids)
         _LOGGER.debug(
             "Group %s PWM targets dispatched (controllers=%s)",
             group_id,
@@ -482,47 +722,30 @@ class LedDriverManager:
         driver, output = resolved[0]
         controller_id = driver.get("controller_id")
         driver_index = _to_int(driver.get("driver_index"))
-        channels = output.get("channels") or []
-        if not channels:
-            slot_index = _to_int(output.get("slot"))
-            if slot_index is not None:
-                channels = [slot_index]
+        channels = self._iter_output_channels(output)
         if controller_id is None or driver_index is None or not channels:
             raise LedDriverError("Output is missing controller/driver/channel mapping")
-
-        try:
-            min_pwm = int(output.get("min_pwm", 0))
-        except (TypeError, ValueError):
-            min_pwm = 0
-        try:
-            max_pwm = int(output.get("max_pwm", 255))
-        except (TypeError, ValueError):
-            max_pwm = 255
-        if max_pwm < min_pwm:
-            max_pwm = min_pwm
 
         try:
             pwm_value = int(pwm)
         except (TypeError, ValueError):
             raise LedDriverError("Invalid PWM value") from None
-        pwm_value = max(min_pwm, min(max_pwm, pwm_value))
+        pwm_value = self._clamp_output_pwm(output, pwm_value)
 
         updates: dict[str, dict[int, dict[int, int]]] = defaultdict(lambda: defaultdict(dict))
         for channel in channels:
-            channel_idx = _to_int(channel)
-            if channel_idx is None:
-                continue
-            updates[controller_id][driver_index][channel_idx] = pwm_value
+            updates[controller_id][driver_index][channel] = pwm_value
 
         responses = await self._dispatch_pwm_updates(updates, strict=True)
 
-        output["pwm"] = pwm_value
-        output["level"] = 1 if pwm_value > min_pwm else 0
-        await self._registry.async_commit()
+        output["target_pwm"] = pwm_value
+        self._set_output_runtime_state(output, pwm=pwm_value, active_group_id=output.get("active_group_id"))
+        await self._registry.async_commit(persist=False)
 
         changed_groups = self._update_groups_from_output_ids({output_id})
         if changed_groups:
             await self._broadcast_group_updates(changed_groups)
+        await self._broadcast_output_updates({output_id})
 
         return responses
 
@@ -536,83 +759,41 @@ class LedDriverManager:
         driver, output = resolved[0]
         controller_id = driver.get("controller_id")
         driver_index = _to_int(driver.get("driver_index"))
-        channels = output.get("channels") or []
-        if not channels:
-            slot_index = _to_int(output.get("slot"))
-            if slot_index is not None:
-                channels = [slot_index]
+        channels = self._iter_output_channels(output)
         if controller_id is None or driver_index is None or not channels:
             raise LedDriverError("Output is missing controller/driver/channel mapping")
 
-        try:
-            min_pwm = int(output.get("min_pwm", 0))
-        except (TypeError, ValueError):
-            min_pwm = 0
-        try:
-            max_pwm = int(output.get("max_pwm", 255))
-        except (TypeError, ValueError):
-            max_pwm = 255
-        if max_pwm < min_pwm:
-            max_pwm = min_pwm
-
-        try:
-            target_pwm = int(output.get("target_pwm", max_pwm))
-        except (TypeError, ValueError):
-            target_pwm = max_pwm
-        target_pwm = max(min_pwm, min(max_pwm, target_pwm))
+        active_group_id = output.get("active_group_id")
+        target_pwm = self._resolve_output_target_pwm(output, group_id=active_group_id)
 
         responses: dict[str, Any] = {}
         if turn_on:
-            slots = [-1, -1, -1, -1]
+            updates: dict[str, dict[int, dict[int, int]]] = defaultdict(lambda: defaultdict(dict))
             for channel in channels:
-                ch_idx = _to_int(channel)
-                if ch_idx is not None and 0 <= ch_idx < len(slots):
-                    slots[ch_idx] = target_pwm
-            message = {
-                "cm": "led",
-                "a": "on",
-                "drvs": [
-                    {
-                        "drv": driver_index,
-                        "cs": slots,
-                    }
-                ],
-            }
+                updates[controller_id][driver_index][channel] = target_pwm
+            pwm_responses = await self._dispatch_pwm_updates(updates, strict=True)
+            on_responses = await self._dispatch_on_updates(updates, strict=True)
+            responses.update(pwm_responses)
+            responses.update(on_responses)
             pwm_value = target_pwm
         else:
-            channel_list: list[int] = []
-            for channel in channels:
-                ch_idx = _to_int(channel)
-                if ch_idx is not None:
-                    channel_list.append(ch_idx)
-            message = {
-                "cm": "led",
-                "a": "off",
-                "drvs": [
-                    {
-                        "drv": driver_index,
-                        "cs": channel_list,
-                    }
-                ],
-            }
-            pwm_value = 0
-
-        try:
-            await self._json_helper.async_send(controller_id, message)
-            responses[controller_id] = {"status": "queued"}
-        except (ValueError, SerialHelperError) as err:
-            raise LedDriverError(str(err)) from err
-        await asyncio.sleep(0)
-        self._queue_serial_log(controller_id, direction="tx", payload=message)
+            channel_map = {controller_id: {driver_index: channels}}
+            responses.update(await self._dispatch_group_channel_action(channel_map, "off", strict=True))
+            min_pwm, _ = self._get_output_pwm_bounds(output)
+            pwm_value = 0 if min_pwm == 0 else min_pwm
 
         # Update local state
-        output["pwm"] = pwm_value
-        output["level"] = 1 if turn_on and pwm_value > min_pwm else 0
-        await self._registry.async_commit()
+        self._set_output_runtime_state(
+            output,
+            pwm=pwm_value,
+            active_group_id=active_group_id if turn_on else None,
+        )
+        await self._registry.async_commit(persist=False)
 
         changed_groups = self._update_groups_from_output_ids({output_id})
         if changed_groups:
             await self._broadcast_group_updates(changed_groups)
+        await self._broadcast_output_updates({output_id})
 
         return responses
 
@@ -890,7 +1071,12 @@ class LedDriverManager:
         changed_groups: set[str] = set()
         for group in self._registry.get_groups():
             led_ids = group.get("led_ids", []) or []
-            if not set(led_ids).intersection(output_ids):
+            impacted_output_ids = set(led_ids).intersection(output_ids)
+            if not impacted_output_ids:
+                continue
+
+            # Overlapping groups cannot be inferred reliably from raw output state.
+            if any(len(self._registry.get_group_ids_for_output(output_id)) > 1 for output_id in impacted_output_ids):
                 continue
 
             resolved = self._registry.resolve_output_ids(led_ids)
@@ -918,7 +1104,31 @@ class LedDriverManager:
                 "is_on": bool(group.get("is_on")),
                 "brightness": group.get("brightness"),
             }
-            self._hass.bus.async_fire("s2j_led_driver_group_state", payload)
+            self._hass.bus.async_fire(_GROUP_STATE_EVENT, payload)
+
+    async def _broadcast_output_updates(self, output_ids: set[str]) -> None:
+        payloads: list[dict[str, Any]] = []
+        for output_id in sorted(output_ids):
+            entry = self._registry.get_output_entry(output_id)
+            if entry is None:
+                continue
+            driver, output = entry
+            payloads.append(
+                {
+                    "output_id": output_id,
+                    "controller_id": driver.get("controller_id"),
+                    "driver_id": driver.get("id"),
+                    "driver_index": driver.get("driver_index"),
+                    "level": output.get("level"),
+                    "pwm": output.get("pwm"),
+                    "target_pwm": output.get("target_pwm"),
+                    "faulty": output.get("faulty", False),
+                    "disabled": output.get("disabled", False),
+                    "active_group_id": output.get("active_group_id"),
+                }
+            )
+        if payloads:
+            self._hass.bus.async_fire(_OUTPUT_STATE_EVENT, {"outputs": payloads})
 
     def _apply_polling_state(self, controller_id: str, controller: dict[str, Any]) -> None:
         if controller.get("polling_enabled"):
@@ -996,9 +1206,11 @@ class LedDriverManager:
                 changed = True
 
         if changed:
-            await self._registry.async_commit()
+            await self._registry.async_commit(persist=False)
             if changed_groups:
                 await self._broadcast_group_updates(changed_groups)
+            if changed_outputs:
+                await self._broadcast_output_updates(changed_outputs)
 
     async def _handle_button_event(self, controller_id: str, event: dict[str, Any]) -> None:
         data = _get(event, "d", "data")
@@ -1344,13 +1556,14 @@ class LedDriverManager:
 
         updates: dict[str, dict[int, dict[int, int]]] = defaultdict(lambda: defaultdict(dict))
         changed = False
+        changed_output_ids: set[str] = set()
+        brightness_samples: list[float] = []
 
         for driver, output in resolved:
             if output.get("disabled"):
                 continue
             pwm = int(output.get("pwm", 0))
-            min_pwm = int(output.get("min_pwm", 0))
-            max_pwm = int(output.get("max_pwm", 255))
+            min_pwm, max_pwm = self._get_output_pwm_bounds(output)
             step = _PWM_STEP_SIZE if direction >= 0 else -_PWM_STEP_SIZE
             target = pwm + step
             if direction >= 0:
@@ -1358,21 +1571,32 @@ class LedDriverManager:
             else:
                 target = max(target, min_pwm)
             if target == pwm:
+                span = max(max_pwm - min_pwm, 0)
+                brightness_samples.append(0.0 if span == 0 else ((pwm - min_pwm) / span) * 100.0)
                 continue
-            output["pwm"] = target
-            output["level"] = 1 if target > min_pwm else 0
+            self._set_output_group_target(output, group_id, target)
+            self._set_output_runtime_state(output, pwm=target, active_group_id=group_id)
             changed = True
+            changed_output_ids.add(output["id"])
             controller_id = driver.get("controller_id")
             driver_index = int(driver.get("driver_index", 0))
-            channels = output.get("channels") or [output.get("slot")]
+            channels = self._iter_output_channels(output)
             for channel_index in channels:
-                updates[controller_id][driver_index][int(channel_index)] = target
+                updates[controller_id][driver_index][channel_index] = target
+
+            span = max(max_pwm - min_pwm, 0)
+            brightness_samples.append(0.0 if span == 0 else ((target - min_pwm) / span) * 100.0)
 
         if not changed:
             return False
 
+        if brightness_samples:
+            group["brightness"] = max(0, min(100, round(sum(brightness_samples) / len(brightness_samples))))
+        self._mark_group_activated(group)
         await self._dispatch_pwm_updates(updates)
-        await self._registry.async_commit()
+        await self._registry.async_commit(persist=False)
+        await self._broadcast_group_updates({group_id})
+        await self._broadcast_output_updates(changed_output_ids)
         return True
 
     async def _dispatch_pwm_updates(

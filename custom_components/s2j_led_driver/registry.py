@@ -58,6 +58,21 @@ def _normalize_metadata(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _normalize_group_targets(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+
+    result: dict[str, int] = {}
+    for group_id, pwm in value.items():
+        if not group_id:
+            continue
+        try:
+            result[str(group_id)] = int(pwm)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
 def _normalize_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -198,8 +213,9 @@ class LedRegistry:
             await self._store.async_save(base_payload)
             await self._meta_store.async_save(meta_payload)
 
-    async def async_commit(self) -> None:
-        await self.async_save()
+    async def async_commit(self, *, persist: bool = True) -> None:
+        if persist:
+            await self.async_save()
         self._async_notify()
 
     async def async_import_snapshot(self, snapshot: dict[str, Any]) -> None:
@@ -933,6 +949,13 @@ class LedRegistry:
                 resolved.append(entry)
         return resolved
 
+    def get_group_ids_for_output(self, output_id: str) -> list[str]:
+        group_ids: list[str] = []
+        for group in self._data["groups"].values():
+            if output_id in (group.get("led_ids") or []):
+                group_ids.append(group["id"])
+        return group_ids
+
     async def async_upsert_driver(self, driver: dict[str, Any]) -> dict[str, Any]:
         driver_id = driver.get("id") or _new_id("drv")
         stored = self._data["drivers"].get(
@@ -1005,10 +1028,17 @@ class LedRegistry:
                 target_pwm = int(incoming.get("target_pwm", previous.get("target_pwm", pwm)))
             except (TypeError, ValueError):
                 target_pwm = pwm
+            group_targets = _normalize_group_targets(
+                incoming.get("group_targets", previous.get("group_targets", {}))
+            )
+            active_group_id = incoming.get("active_group_id", previous.get("active_group_id"))
+            if active_group_id is not None:
+                active_group_id = str(active_group_id)
             if disabled:
                 level = 0
                 pwm = min_pwm
                 target_pwm = min_pwm
+                active_group_id = None
             faulty = False if disabled else bool(incoming.get("faulty", previous.get("faulty", False)))
 
             normalized.append(
@@ -1024,6 +1054,8 @@ class LedRegistry:
                     "min_pwm": min_pwm,
                     "max_pwm": max_pwm,
                     "target_pwm": target_pwm,
+                    "group_targets": group_targets,
+                    "active_group_id": active_group_id,
                 }
             )
 
@@ -1147,7 +1179,11 @@ class LedRegistry:
             if max_pwm < min_pwm:
                 max_pwm = min_pwm
 
-            pwm_value = int(min_pwm + (max_pwm - min_pwm) * (brightness_value / 100.0))
+            group_targets = _normalize_group_targets(output.get("group_targets", {}))
+            if brightness is None and group_id in group_targets:
+                pwm_value = max(min_pwm, min(max_pwm, int(group_targets[group_id])))
+            else:
+                pwm_value = int(min_pwm + (max_pwm - min_pwm) * (brightness_value / 100.0))
 
             slots = mapping[controller_id].setdefault(driver_index, [-1, -1, -1, -1])
             for channel in channels:
