@@ -528,6 +528,8 @@ class LedRegistry:
                 "name": controller.get("name") or controller_id,
                 "port": controller.get("port"),
                 "baudrate": int(controller.get("baudrate", 115200)),
+                "debug_port": controller.get("debug_port"),
+                "debug_baudrate": int(controller.get("debug_baudrate", controller.get("baudrate", 115200))),
                 "metadata": _normalize_metadata(controller.get("metadata", {})),
                 "polling_enabled": bool(controller.get("polling_enabled", False)),
                 "has_can_interface": _normalize_bool(
@@ -542,6 +544,10 @@ class LedRegistry:
                 "name": controller.get("name", stored.get("name", controller_id)),
                 "port": controller.get("port", stored.get("port")),
                 "baudrate": int(controller.get("baudrate", stored.get("baudrate", 115200))),
+                "debug_port": controller.get("debug_port", stored.get("debug_port")),
+                "debug_baudrate": int(
+                    controller.get("debug_baudrate", stored.get("debug_baudrate", stored.get("baudrate", 115200)))
+                ),
                 "metadata": _normalize_metadata(controller.get("metadata", stored.get("metadata", {}))),
                 "polling_enabled": bool(controller.get("polling_enabled", stored.get("polling_enabled", False))),
                 "has_can_interface": _normalize_bool(

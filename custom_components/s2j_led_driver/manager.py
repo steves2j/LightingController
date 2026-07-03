@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import uuid
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -109,6 +110,7 @@ class LedDriverManager:
         self._listeners_registered = False
         self._poll_tasks: dict[str, asyncio.Task] = {}
         self._poll_enabled: set[str] = set()
+        self._terminal_helpers: dict[str, SerialHelper] = {}
         self._button_states: dict[tuple[int, int], _ButtonState] = {}
         self._switch_buttons: dict[int, list[_ButtonState]] = defaultdict(list)
         self._switch_masks: dict[int, int] = {}
@@ -937,12 +939,73 @@ class LedDriverManager:
         self._button_states.clear()
         self._switch_buttons.clear()
         self._switch_masks.clear()
+        for session_id in list(self._terminal_helpers):
+            await self.async_close_terminal(session_id)
 
     async def async_set_controller_poll(self, controller_id: str, enabled: bool) -> None:
         await self._registry.async_upsert_controller({"id": controller_id, "polling_enabled": enabled})
         controller = next((ctrl for ctrl in self._registry.get_controllers() if ctrl["id"] == controller_id), None)
         if controller is not None:
             self._apply_polling_state(controller_id, controller)
+
+    async def async_open_terminal(self, controller_id: str) -> tuple[str, SerialHelper]:
+        """Open a raw debug terminal session for a controller."""
+        controller = next((ctrl for ctrl in self._registry.get_controllers() if ctrl.get("id") == controller_id), None)
+        if controller is None:
+            raise LedDriverError(f"Unknown controller {controller_id}")
+
+        port = controller.get("debug_port")
+        if not port:
+            raise LedDriverError(f"Controller {controller_id} has no debug serial port configured")
+
+        try:
+            baudrate = int(controller.get("debug_baudrate") or controller.get("baudrate") or DEFAULT_BAUDRATE)
+        except (TypeError, ValueError):
+            baudrate = DEFAULT_BAUDRATE
+
+        helper = SerialHelper(port=str(port), baudrate=baudrate, raw=True)
+        try:
+            await helper.async_connect()
+        except SerialHelperError as err:
+            raise LedDriverError(str(err)) from err
+
+        session_id = uuid.uuid4().hex
+        self._terminal_helpers[session_id] = helper
+        return session_id, helper
+
+    async def async_open_terminal_port(self, port: str, baudrate: int | None = None) -> tuple[str, SerialHelper]:
+        """Open a raw debug terminal session for an explicit serial port."""
+        port_value = str(port or "").strip()
+        if not port_value:
+            raise LedDriverError("Serial device address is required")
+
+        try:
+            baudrate_value = int(baudrate or DEFAULT_BAUDRATE)
+        except (TypeError, ValueError):
+            baudrate_value = DEFAULT_BAUDRATE
+
+        helper = SerialHelper(port=port_value, baudrate=baudrate_value, raw=True)
+        try:
+            await helper.async_connect()
+        except SerialHelperError as err:
+            raise LedDriverError(str(err)) from err
+
+        session_id = uuid.uuid4().hex
+        self._terminal_helpers[session_id] = helper
+        return session_id, helper
+
+    async def async_terminal_input(self, session_id: str, data: bytes) -> None:
+        """Write raw terminal input bytes to a debug session."""
+        helper = self._terminal_helpers.get(session_id)
+        if helper is None:
+            raise LedDriverError("Terminal session is not active")
+        await helper.async_send_raw(data)
+
+    async def async_close_terminal(self, session_id: str) -> None:
+        """Close a raw debug terminal session."""
+        helper = self._terminal_helpers.pop(session_id, None)
+        if helper is not None:
+            await helper.async_close()
 
     def _apply_channel_state_event(self, controller_id: str, event: dict[str, Any]) -> set[str]:
         driver_index = _to_int(_get(event, "dvr", "driver", "idx"))

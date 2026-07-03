@@ -19,6 +19,7 @@ from .const import DOMAIN, PLATFORMS
 from .manager import LedDriverManager
 from .patches import ensure_safe_tcp_keepalive
 from .registry import LedRegistry
+from .terminal import async_register_websocket_commands
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: LedDriverConfigEntry) ->
 
     if not domain_data.get("_http_registered"):
         await async_register_http_views(hass)
+        await async_register_websocket_commands(hass)
         domain_data["_http_registered"] = True
 
     if not domain_data.get("_panel_registered"):
@@ -191,10 +193,19 @@ async def _register_panel(hass: HomeAssistant) -> None:
         frontend_url_path="led-driver",
         config={"url": "/s2j_led_driver_static/led_driver_panel/index.html"},
     )
+    frontend.async_register_built_in_panel(
+        hass,
+        component_name="iframe",
+        sidebar_title="LED Terminal",
+        sidebar_icon="mdi:console",
+        frontend_url_path="led-terminal",
+        config={"url": "/s2j_led_driver_static/terminal.html"},
+    )
 
 
 def _remove_panel(hass: HomeAssistant) -> None:
     frontend.async_remove_panel(hass, "led-driver")
+    frontend.async_remove_panel(hass, "led-terminal")
 
 
 def _safe_float(value: Any) -> float:

@@ -1,0 +1,92 @@
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: #101316;
+  color: #e8edf2;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.terminal-shell {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  height: 100%;
+  min-height: 100vh;
+}
+
+.terminal-toolbar {
+  display: flex;
+  align-items: end;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  background: #1b2127;
+  border-bottom: 1px solid #303942;
+  flex-wrap: wrap;
+}
+
+.terminal-toolbar label {
+  display: grid;
+  gap: 0.25rem;
+  color: #aeb9c4;
+  font-size: 0.78rem;
+}
+
+.terminal-toolbar input {
+  min-width: 14rem;
+  color: #e8edf2;
+  background: #11171d;
+  border: 1px solid #3a4650;
+  border-radius: 4px;
+  padding: 0.42rem 0.55rem;
+}
+
+.terminal-toolbar input#baudrate {
+  min-width: 7rem;
+  width: 7rem;
+}
+
+.terminal-toolbar button {
+  color: #e8edf2;
+  background: #29333c;
+  border: 1px solid #43505b;
+  border-radius: 4px;
+  padding: 0.48rem 0.7rem;
+  cursor: pointer;
+}
+
+.terminal-toolbar button.primary {
+  background: #1f6feb;
+  border-color: #388bfd;
+}
+
+.terminal-toolbar button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.status {
+  margin-left: auto;
+  color: #aeb9c4;
+  font-size: 0.86rem;
+}
+
+.terminal {
+  min-height: 0;
+  padding: 0.5rem;
+}
+
+.terminal .xterm {
+  height: 100%;
+}
+
+.error {
+  min-height: 1.2rem;
+  margin: 0;
+  padding: 0 0.75rem 0.75rem;
+  color: #ff8c8c;
+}

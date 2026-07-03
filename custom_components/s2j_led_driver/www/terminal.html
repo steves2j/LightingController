@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>LED Driver Terminal</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="vendor/xterm/xterm.css" />
+    <link rel="stylesheet" href="terminal.css" />
+  </head>
+  <body>
+    <main class="terminal-shell">
+      <header class="terminal-toolbar">
+        <label>
+          Entry
+          <input id="entry-id" type="text" autocomplete="off" placeholder="Home Assistant entry id" />
+        </label>
+        <label>
+          Device
+          <input id="device-address" type="text" autocomplete="off" placeholder="/dev/ttyUSB1" />
+        </label>
+        <label>
+          Baud
+          <input id="baudrate" type="number" min="1" step="1" value="115200" />
+        </label>
+        <button id="connect" class="primary">Connect</button>
+        <button id="disconnect" disabled>Disconnect</button>
+        <button id="clear">Clear</button>
+        <span id="status" class="status">Disconnected</span>
+      </header>
+      <section id="terminal" class="terminal"></section>
+      <p id="error" class="error"></p>
+    </main>
+
+    <script src="vendor/xterm/xterm.min.js"></script>
+    <script src="vendor/xterm/xterm-addon-fit.min.js"></script>
+    <script type="module" src="terminal.js"></script>
+  </body>
+</html>

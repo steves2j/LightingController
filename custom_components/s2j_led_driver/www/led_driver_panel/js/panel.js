@@ -1168,6 +1168,7 @@ let pendingSwitchSelectKey = null;
       function renderControllerSummaryRow(controller, key, isDraft) {
         const metadataCount = controller.metadata ? Object.keys(controller.metadata).length : 0;
         const baud = controller.baudrate || 115200;
+        const debugBaud = controller.debug_baudrate || baud;
         const metaLabel = metadataCount ? `${metadataCount} meta` : "";
         const serialStatus = controller.serial_status || {};
         const isOpen = Boolean(serialStatus.is_open);
@@ -1233,7 +1234,10 @@ let pendingSwitchSelectKey = null;
                 ${serialError}
               </div>
             </td>
-            <td>${baud}${metaLabel ? ` · ${metaLabel}` : ""}</td>
+            <td>
+              ${baud}${metaLabel ? ` · ${metaLabel}` : ""}
+              ${controller.debug_port ? `<span class="hint controller-meta">Debug: ${escapeHtml(controller.debug_port)} @ ${debugBaud}</span>` : ""}
+            </td>
             <td>${canInterfaceCell}</td>
             <td class="controller-actions-cell">
               ${actions}
@@ -1264,6 +1268,14 @@ let pendingSwitchSelectKey = null;
                   <label>
                     Baudrate
                     <input data-field="baudrate" type="number" value="${controller.baudrate || 115200}" />
+                  </label>
+                  <label>
+                    Debug Port
+                    <input data-field="debug_port" value="${controller.debug_port || ""}" placeholder="/dev/ttyUSB1" />
+                  </label>
+                  <label>
+                    Debug Baudrate
+                    <input data-field="debug_baudrate" type="number" value="${controller.debug_baudrate || controller.baudrate || 115200}" />
                   </label>
                   <label>
                     Metadata (JSON)
@@ -3452,6 +3464,8 @@ function findSwitchByKey(key) {
           name: "",
           port: "",
           baudrate: 115200,
+          debug_port: "",
+          debug_baudrate: 115200,
           metadata: {},
           polling_enabled: false,
           has_can_interface: false,
@@ -3613,6 +3627,8 @@ function readControllerCard(card) {
           name: card.querySelector('[data-field="name"]').value.trim(),
           port: card.querySelector('[data-field="port"]').value.trim(),
           baudrate: Number(card.querySelector('[data-field="baudrate"]').value) || 115200,
+          debug_port: card.querySelector('[data-field="debug_port"]')?.value.trim() || "",
+          debug_baudrate: Number(card.querySelector('[data-field="debug_baudrate"]')?.value) || 115200,
         };
         if (payload.id) {
           const existing = state.controllers.find((ctrl) => ctrl.id === payload.id);

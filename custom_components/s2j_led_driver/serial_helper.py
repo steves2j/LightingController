@@ -20,13 +20,14 @@ class SerialHelperError(Exception):
 class SerialHelper:
     """Basic wrapper for managing an async serial connection."""
 
-    def __init__(self, *, port: str, baudrate: int) -> None:
+    def __init__(self, *, port: str, baudrate: int, raw: bool = False) -> None:
         self._port = port
         self._baudrate = baudrate
+        self._raw = raw
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
-        self._read_queue: asyncio.Queue[str] = asyncio.Queue()
-        self._write_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._read_queue: asyncio.Queue[str | bytes] = asyncio.Queue()
+        self._write_queue: asyncio.Queue[str | bytes] = asyncio.Queue()
         self._reader_task: Optional[asyncio.Task] = None
         self._writer_task: Optional[asyncio.Task] = None
         self._reconnect_task: Optional[asyncio.Task] = None
@@ -94,12 +95,12 @@ class SerialHelper:
         self._reconnecting = False
 
     @property
-    def read_queue(self) -> asyncio.Queue[str]:
+    def read_queue(self) -> asyncio.Queue[str | bytes]:
         """Queue containing raw lines read from the serial connection."""
         return self._read_queue
 
     @property
-    def write_queue(self) -> asyncio.Queue[str]:
+    def write_queue(self) -> asyncio.Queue[str | bytes]:
         """Queue of commands pending transmission."""
         return self._write_queue
 
@@ -110,6 +111,13 @@ class SerialHelper:
         await self._write_queue.put(line)
         _LOGGER.debug("SerialHelper queued TX (size=%s): %s", self._write_queue.qsize(), line.rstrip())
 
+    async def async_send_raw(self, data: bytes) -> None:
+        """Enqueue raw bytes for transmission."""
+        if not isinstance(data, bytes):
+            raise TypeError("Raw serial payload must be bytes")
+        _LOGGER.debug("SerialHelper enqueue raw TX (size=%s, bytes=%s)", self._write_queue.qsize(), len(data))
+        await self._write_queue.put(data)
+
     def _ensure_reader(self) -> None:
         if self._reader is None or self._reader_task is not None:
             return
@@ -117,11 +125,17 @@ class SerialHelper:
         async def _reader_loop() -> None:
             try:
                 while True:
-                    line = await self._reader.readline()
-                    if not line:
+                    chunk = await (self._reader.read(1024) if self._raw else self._reader.readline())
+                    if not chunk:
                         _LOGGER.debug("SerialHelper reader reached EOF")
                         await self._handle_serial_failure()
                         break
+                    if self._raw:
+                        _LOGGER.debug("SerialHelper RX raw bytes: %s", len(chunk))
+                        await self._read_queue.put(chunk)
+                        continue
+
+                    line = chunk
                     decoded = line.decode("utf-8", errors="replace").rstrip("\r\n")
                     # NOTE: first chunk uses labeled debug, subsequent chunks are raw for diagnostics.
                     if decoded:
@@ -153,13 +167,18 @@ class SerialHelper:
         async def _writer_loop() -> None:
             try:
                 while True:
-                    line = await self._write_queue.get()
-                    _LOGGER.debug("SerialHelper dequeued TX (size=%s): %s", self._write_queue.qsize(), line.rstrip())
+                    item = await self._write_queue.get()
                     if self._writer is None:
                         _LOGGER.debug("Writer loop received data after disconnect")
                         break
-                    payload = f"{line.rstrip()}\r\n".encode("utf-8")
-                    _LOGGER.debug("SerialHelper TX line: %s", line.rstrip())
+
+                    if isinstance(item, bytes):
+                        payload = item
+                        _LOGGER.debug("SerialHelper TX raw bytes: %s", len(payload))
+                    else:
+                        _LOGGER.debug("SerialHelper dequeued TX (size=%s): %s", self._write_queue.qsize(), item.rstrip())
+                        payload = f"{item.rstrip()}\r\n".encode("utf-8")
+                        _LOGGER.debug("SerialHelper TX line: %s", item.rstrip())
                     self._writer.write(payload)
                     try:
                         await self._writer.drain()
