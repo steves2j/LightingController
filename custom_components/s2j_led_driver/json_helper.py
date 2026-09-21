@@ -21,6 +21,7 @@ class JsonHelper:
     helpers: Dict[str, SerialHelper] = field(default_factory=dict)
     listeners: Dict[str, List[Callable[[str, dict[str, Any]], None]]] = field(default_factory=dict)
     helper_tasks: Dict[str, asyncio.Task] = field(default_factory=dict)
+    blocked: set[str] = field(default_factory=set)
 
     def register_helper(self, name: str, helper: SerialHelper) -> None:
         """Register or replace a serial helper by name and start listening."""
@@ -42,8 +43,10 @@ class JsonHelper:
         """Register a callback for a specific event key."""
         self.listeners.setdefault(event, []).append(callback)
 
-    async def async_send(self, helper_name: str, payload: dict[str, Any]) -> None:
+    async def async_send(self, helper_name: str, payload: dict[str, Any], *, maintenance: bool = False) -> None:
         """Serialize payload to JSON and enqueue it on the selected helper."""
+        if helper_name in self.blocked and not maintenance:
+            raise ValueError("Controller is reserved for firmware maintenance")
         helper = self.get_helper(helper_name)
         if helper is None:
             raise ValueError(f"Helper '{helper_name}' is not registered")
@@ -92,6 +95,10 @@ class JsonHelper:
                             continue
                     elif message_type == "status":
                         event = "status"
+                    elif message_type == "settings" or (message_type == "error" and message.get("cm") == "settings"):
+                        # Settings backup/restore replies are request/response
+                        # traffic used by the firmware updater.
+                        event = "settings"
                     else:
                         continue
 

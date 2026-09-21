@@ -68,5 +68,40 @@ views:
 - Key code: `custom_components/s2j_led_driver` (logic, registry, API, entities), `www/led_driver_panel` + `www/controller_overview.html` (frontend).
 - Requirements: `pyserial`, `pyserial-asyncio`.
 
+## USB firmware updates
+
+Each saved controller has an **Upd FW** action. Select the PlatformIO-generated
+`firmware.zip` (not `firmware.bin`); the integration backs up device settings,
+releases the controller serial port, enters the XIAO bootloader with the
+1200-baud touch, transfers the DFU package, reconnects, and compares the
+post-update settings. If they differ, the dialog provides both snapshots and a
+button to restore the saved device settings.
+
+The backup is saved in HA storage before entering DFU and can be downloaded
+from the dialog. Reopening **Upd FW** resumes progress or shows the last
+result. Normal commands, status polling, and terminal access are blocked
+during maintenance. Restore restarts the controller and reads the settings
+back before declaring success; differing values are never silently restored.
+Only application-only ZIP packages linked for this controller are accepted.
+Packages have CRC integrity checks, not cryptographic signature verification:
+upload only firmware you trust. Firmware upload requires an HA administrator.
+
+The HA host/container must have access to the XIAO USB device. The integration
+implements the XIAO's USB serial DFU framing itself, using only its existing
+`pyserial` dependency—no `nrfutil`, `adafruit-nrfutil`, or external updater is
+required. The controller firmware must include the `settings backup` and
+`settings restore` HA JSON support introduced alongside this feature.
+
+Local tests (from the HA project directory):
+
+```sh
+.venv/bin/python tools/test_native_dfu.py
+# Starts the existing config/ HA instance and flashes the attached TEST board.
+# Also changes/restores its display name to verify settings recovery.
+.venv/bin/python tools/test_firmware_hardware.py --flash --restore-test --port /dev/cu.usbmodem14101
+```
+
+The hardware harness leaves HA running on http://localhost:8123 after testing.
+
 ## Issues / Docs
 - Docs & issues: https://github.com/steves2j/LightingController/issues

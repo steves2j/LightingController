@@ -65,9 +65,12 @@ import {
   fetchRegistry,
   importRegistry,
   clearRegistryMetadata,
+  uploadControllerFirmware,
+  getControllerFirmwareUpdate,
+  restoreControllerFirmwareSettings,
 } from "./api.js";
 
-const PANEL_VERSION = "6.2"; // increment for visibility per sync request
+const PANEL_VERSION = "6.3";
 // Expose version globally for other pages (e.g., controller_overview)
 if (typeof window !== "undefined") {
   window.LED_DRIVER_PANEL_VERSION = PANEL_VERSION;
@@ -75,6 +78,8 @@ if (typeof window !== "undefined") {
 
 const pendingButtonToggles = new Map();
 const pendingSsrToggles = new Map();
+let firmwareDialog = null;
+let firmwarePollTimer = null;
 const PATCH_PANEL_GROUP_RANGES = [
   { start: 1, end: 8, row: 0 },
   { start: 9, end: 16, row: 0 },
@@ -89,6 +94,122 @@ function confirmDeletion(message) {
     return true;
   }
   return window.confirm(message);
+}
+
+function ensureFirmwareDialog() {
+  if (firmwareDialog) return firmwareDialog;
+  const dialog = document.createElement("dialog");
+  dialog.className = "firmware-dialog";
+  dialog.innerHTML = `
+    <form method="dialog"><button class="firmware-close" aria-label="Close">×</button></form>
+    <h3>Firmware update</h3>
+    <p class="firmware-message"></p>
+    <progress class="firmware-progress" max="100" value="0"></progress>
+    <div class="firmware-percent"></div>
+    <button type="button" class="secondary firmware-select">Choose firmware.zip</button>
+    <button type="button" class="secondary firmware-download" hidden>Download settings backup</button>
+    <div class="firmware-settings" hidden>
+      <p><strong>Device settings changed after the update.</strong> Review the snapshots, then restore the saved settings if appropriate.</p>
+      <div class="firmware-settings-grid"><div>Before<pre class="firmware-before"></pre></div><div>After<pre class="firmware-after"></pre></div></div>
+      <button type="button" class="primary firmware-restore">Restore saved settings</button>
+    </div>`;
+  document.body.append(dialog);
+  firmwareDialog = dialog;
+  dialog.addEventListener("close", () => {
+    if (firmwarePollTimer) clearInterval(firmwarePollTimer);
+    firmwarePollTimer = null;
+  });
+  return dialog;
+}
+
+function renderFirmwareUpdate(update) {
+  const dialog = ensureFirmwareDialog();
+  dialog.querySelector(".firmware-message").textContent = update.message || update.phase || "Preparing update";
+  dialog.querySelector(".firmware-progress").value = Number(update.progress || 0);
+  dialog.querySelector(".firmware-percent").textContent = `${Number(update.progress || 0)}%`;
+  const settings = dialog.querySelector(".firmware-settings");
+  const restore = dialog.querySelector(".firmware-restore");
+  const showSettings = Boolean(update.settings_differ);
+  settings.hidden = !showSettings;
+  if (showSettings) {
+    dialog.querySelector(".firmware-before").textContent = JSON.stringify(update.before_settings || {}, null, 2);
+    dialog.querySelector(".firmware-after").textContent = JSON.stringify(update.after_settings || {}, null, 2);
+  }
+  restore.hidden = !Boolean(update.restore_available);
+  restore.disabled = Boolean(update.running);
+  dialog.querySelector('.firmware-select').disabled = Boolean(update.running);
+  const download = dialog.querySelector('.firmware-download');
+  download.hidden = !update.before_settings;
+  download.onclick = () => {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(update.before_settings, null, 2)], {type:'application/json'}));
+    const link = document.createElement('a'); link.href=url; link.download='controller-settings-backup.json'; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  restore.onclick = async () => {
+    restore.disabled = true;
+    try {
+      const updateState = await restoreControllerFirmwareSettings(dialog.dataset.entryId, update.controller_id);
+      renderFirmwareUpdate(updateState);
+    } catch (error) {
+      setError(error.message || "Failed to restore device settings");
+      restore.disabled = false;
+    }
+  };
+}
+
+async function beginFirmwareUpdate(controllerId) {
+  const entryId = state.entryId;
+  const dialog = ensureFirmwareDialog();
+  dialog.dataset.entryId = entryId;
+  if (!dialog.open) dialog.showModal();
+  const poll = () => {
+    if (firmwarePollTimer) clearInterval(firmwarePollTimer);
+    firmwarePollTimer = setInterval(async () => {
+      try {
+        const update = await getControllerFirmwareUpdate(entryId, controllerId);
+        renderFirmwareUpdate(update);
+        if (!update.running) clearInterval(firmwarePollTimer);
+      } catch (error) { dialog.querySelector('.firmware-message').textContent=error.message; }
+    }, 1000);
+  };
+  const chooser = document.createElement("input");
+  chooser.type = "file";
+  chooser.accept = ".zip,application/zip";
+  chooser.addEventListener("change", async () => {
+    const file = chooser.files?.[0];
+    if (!file) return;
+    const dialog = ensureFirmwareDialog();
+    if (!dialog.open) dialog.showModal();
+    renderFirmwareUpdate({ controller_id: controllerId, running: true, phase: "uploading", progress: 0, message: `Uploading ${file.name}` });
+    try {
+      const update = await uploadControllerFirmware(entryId, controllerId, file);
+      renderFirmwareUpdate(update);
+      if (firmwarePollTimer) clearInterval(firmwarePollTimer);
+      firmwarePollTimer = setInterval(async () => {
+        try {
+          const current = await getControllerFirmwareUpdate(entryId, controllerId);
+          renderFirmwareUpdate(current);
+          if (!current.running) clearInterval(firmwarePollTimer);
+        } catch (error) {
+          clearInterval(firmwarePollTimer);
+          setError(error.message || "Unable to read firmware update progress");
+        }
+      }, 750);
+    } catch (error) {
+      renderFirmwareUpdate({ controller_id: controllerId, phase: "failed", progress: 0, message: error.message || "Firmware upload failed" });
+    }
+  });
+  dialog.querySelector('.firmware-select').onclick = () => { chooser.value = ''; chooser.click(); };
+  // Keep this inside the original click gesture (Safari blocks pickers
+  // opened after an awaited HTTP request). Cancelling still shows last job.
+  renderFirmwareUpdate({controller_id: controllerId, phase: 'idle', message: 'Choose firmware.zip to update this controller'});
+  chooser.click();
+  try {
+    const existing = await getControllerFirmwareUpdate(entryId, controllerId);
+    if (chooser.files?.length) return;
+    renderFirmwareUpdate(existing);
+    if (existing.running) { poll(); return; }
+  } catch (error) { dialog.querySelector('.firmware-message').textContent=error.message; }
 }
 
 function stripRegistryMetadata(snapshot) {
@@ -1214,6 +1335,7 @@ let pendingSwitchSelectKey = null;
                 ${pollToggle}
                 <div class="row-actions">
                   <button class="secondary" data-action="edit-controller" data-key="${key}" data-draft="${isDraft}">Edit</button>
+                  <button class="secondary" data-action="update-firmware" data-controller-id="${controller.id}">Upd FW</button>
                   <button class="danger" data-action="delete-controller" data-key="${key}" data-draft="${isDraft}">${
               isDraft ? "Discard" : "Delete"
             }</button>
@@ -2323,6 +2445,14 @@ let pendingSwitchSelectKey = null;
         if (action === "edit-controller") {
           state.editing.controllers.add(key);
           renderControllers();
+          return;
+        }
+
+        if (action === "update-firmware") {
+          const controllerId = button.dataset.controllerId;
+          if (controllerId) {
+            beginFirmwareUpdate(controllerId);
+          }
           return;
         }
 

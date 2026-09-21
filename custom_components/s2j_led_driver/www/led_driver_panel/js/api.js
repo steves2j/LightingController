@@ -119,6 +119,35 @@ export function setControllerCanInterface(entryId, controllerId, enabled) {
   });
 }
 
+async function firmwareRequest(method, entryId, controllerId, body) {
+  const token = getAuthToken();
+  const headers = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (typeof body === "string") headers["Content-Type"] = "application/json";
+  const response = await fetch(`/api/s2j_led_driver/${entryId}/firmware/${controllerId}`, {
+    method,
+    headers,
+    body,
+    credentials: "same-origin",
+  });
+  if (!response.ok) throw new Error((await response.text()) || response.statusText);
+  return response.json();
+}
+
+export function uploadControllerFirmware(entryId, controllerId, file) {
+  const form = new FormData();
+  form.append("firmware", file, file.name);
+  return firmwareRequest("POST", entryId, controllerId, form);
+}
+
+export function getControllerFirmwareUpdate(entryId, controllerId) {
+  return firmwareRequest("GET", entryId, controllerId);
+}
+
+export function restoreControllerFirmwareSettings(entryId, controllerId) {
+  return firmwareRequest("POST", entryId, controllerId, JSON.stringify({ action: "restore_settings" }));
+}
+
 export function setLedOutputTargets(entryId, targets) {
   if (!entryId) {
     return Promise.reject(new Error("Select an integration entry before updating LEDs."));

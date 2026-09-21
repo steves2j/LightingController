@@ -3,7 +3,13 @@
 from __future__ import annotations   
 
 from typing import Any
+import contextlib
+import asyncio
+import io
 import logging
+import os
+import tempfile
+import zipfile
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
@@ -12,6 +18,7 @@ from homeassistant.core import HomeAssistant
 from .const import DOMAIN
 from .registry import serialize_registry_snapshot
 from .manager import LedDriverError
+from .dfu import DfuError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -21,6 +28,7 @@ async def async_register_http_views(hass: HomeAssistant) -> None:
     hass.http.register_view(LedDriverStateView(hass))
     hass.http.register_view(LedDriverCommandView(hass))
     hass.http.register_view(LedDriverOutputTargetsView(hass))
+    hass.http.register_view(LedDriverFirmwareView(hass))
     hass.http.register_view(LedDriverEntriesView(hass))
     hass.http.register_view(LedDriverRegistryView(hass))
     hass.http.register_view(LedDriverRegistryControllersView(hass))
@@ -194,6 +202,63 @@ class LedDriverCommandView(LedDriverBaseView):
         raise web.HTTPBadRequest(text="Unsupported command")
 
 
+class LedDriverFirmwareView(LedDriverBaseView):
+    """Upload an application DFU package and expose update progress."""
+
+    url = "/api/s2j_led_driver/{entry_id}/firmware/{controller_id}"
+    name = "api:s2j_led_driver:firmware"
+
+    async def get(self, request: web.Request, entry_id: str, controller_id: str) -> web.Response:
+        manager = self._resolve_entry(entry_id)["manager"]
+        return web.json_response(manager.get_firmware_update(controller_id) or {"phase": "idle", "progress": 0})
+
+    async def post(self, request: web.Request, entry_id: str, controller_id: str) -> web.Response:
+        if not request["hass_user"].is_admin:
+            raise web.HTTPForbidden(text="Administrator access required for firmware updates")
+        manager = self._resolve_entry(entry_id)["manager"]
+        if request.content_type.startswith("multipart/"):
+            form = await request.post()
+            upload = form.get("firmware")
+            if upload is None or not getattr(upload, "filename", ""):
+                raise web.HTTPBadRequest(text="Select a firmware.zip file")
+            filename = str(upload.filename)
+            if not filename.lower().endswith(".zip"):
+                raise web.HTTPBadRequest(text="Firmware must be a .zip DFU package")
+            content = await asyncio.to_thread(upload.file.read, 16 * 1024 * 1024 + 1)
+            if not content or len(content) > 16 * 1024 * 1024:
+                raise web.HTTPBadRequest(text="Firmware package is empty or exceeds 16 MiB")
+            try:
+                with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                    if "manifest.json" not in archive.namelist():
+                        raise web.HTTPBadRequest(text="Not a Nordic/Adafruit DFU package (manifest.json missing)")
+            except zipfile.BadZipFile as err:
+                raise web.HTTPBadRequest(text="Invalid firmware ZIP file") from err
+            handle = tempfile.NamedTemporaryFile(prefix="s2j-dfu-", suffix=".zip", delete=False)
+            try:
+                handle.write(content)
+            finally:
+                handle.close()
+            package_path = handle.name
+            manager = self._resolve_entry(entry_id)["manager"]
+            try:
+                state = await manager.async_start_firmware_update(controller_id, package_path)
+            except (LedDriverError, DfuError) as err:
+                with contextlib.suppress(OSError):
+                    os.unlink(package_path)
+                raise web.HTTPBadRequest(text=str(err)) from err
+            return web.json_response(state)
+
+        payload = await request.json()
+        if payload.get("action") != "restore_settings":
+            raise web.HTTPBadRequest(text="Unsupported firmware action")
+        manager = self._resolve_entry(entry_id)["manager"]
+        try:
+            state = await manager.async_restore_firmware_settings(controller_id)
+        except LedDriverError as err:
+            raise web.HTTPBadRequest(text=str(err)) from err
+        return web.json_response(state)
+
+
 class LedDriverOutputTargetsView(LedDriverBaseView):
     """Store per-output PWM targets coming from the UI."""
 
@@ -257,6 +322,8 @@ class LedDriverRegistryView(LedDriverBaseView):
         registry = entry_data["registry"]
         payload = await request.json()
         try:
+            if entry_data["manager"]._maintenance:
+                raise web.HTTPConflict(text="Firmware maintenance is in progress")
             await registry.async_import_snapshot(payload)
         except ValueError as err:
             raise web.HTTPBadRequest(text=str(err)) from err
@@ -290,6 +357,8 @@ class _BaseRegistryMutationView(LedDriverBaseView):
             raise web.HTTPBadRequest(text="Payload must include 'item'")
 
         if self.section == "controllers":
+            if entry_data["manager"]._maintenance:
+                raise web.HTTPConflict(text="Firmware maintenance is in progress")
             stored = await registry.async_upsert_controller(item)
         elif self.section == "drivers":
             stored = await registry.async_upsert_driver(item)
@@ -315,6 +384,8 @@ class _BaseRegistryDeleteView(LedDriverBaseView):
         registry = entry_data["registry"]
 
         if self.section == "controllers":
+            if entry_data["manager"]._maintenance:
+                raise web.HTTPConflict(text="Firmware maintenance is in progress")
             await registry.async_delete_controller(item_id)
         elif self.section == "drivers":
             await registry.async_delete_driver(item_id)

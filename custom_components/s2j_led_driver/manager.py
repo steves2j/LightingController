@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import logging
+import os
 import uuid
+import hashlib
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -13,11 +16,13 @@ from time import monotonic
 from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.storage import Store
 
 from .const import DEFAULT_BAUDRATE
 from .registry import LedRegistry, SSR_ALLOWED_BITS
 from .serial_helper import SerialHelper, SerialHelperError
 from .json_helper import JsonHelper
+from .dfu import DfuError, async_flash, async_touch_1200, async_wait_for_bootloader_port, async_application_port, identify_device, _read_package
 
 ControllerListener = Callable[[dict[str, Any]], None]
 
@@ -115,9 +120,20 @@ class LedDriverManager:
         self._switch_buttons: dict[int, list[_ButtonState]] = defaultdict(list)
         self._switch_masks: dict[int, int] = {}
         self._activation_sequence = 0
+        self._firmware_updates: dict[str, dict[str, Any]] = {}
+        self._settings_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._maintenance: set[str] = set()
+        self._update_tasks: set[asyncio.Task] = set()
+        self._settings_requests: dict[str, tuple[str, str]] = {}
 
     async def async_initialize(self) -> None:
         """Ensure serial clients exist for stored controllers."""
+        for controller in self._registry.get_controllers():
+            saved = await self._update_store(controller["id"]).async_load()
+            if saved:
+                if saved.get("running"):
+                    saved.update(running=False, phase="interrupted", message="Update interrupted; saved settings retained")
+                self._firmware_updates[controller["id"]] = saved
         await self._sync_clients()
         if self._registry_listener is None:
             self._registry_listener = self._handle_registry_change
@@ -145,6 +161,8 @@ class LedDriverManager:
 
         # Create or refresh helpers
         for controller_id, controller in controllers.items():
+            if controller_id in self._maintenance:
+                continue
             port = controller.get("port")
             baudrate = controller.get("baudrate", DEFAULT_BAUDRATE)
             helper = self._serial_helpers.get(controller_id)
@@ -195,6 +213,7 @@ class LedDriverManager:
         self._json_helper.register_listener("led.fault_cleared", self._on_led_fault_cleared)
         self._json_helper.register_listener("can.message", self._on_can_message)
         self._json_helper.register_listener("status", self._on_status_message)
+        self._json_helper.register_listener("settings", self._on_settings_message)
         self._listeners_registered = True
 
     def get_controller_serial_status(self) -> dict[str, dict[str, Any]]:
@@ -235,6 +254,17 @@ class LedDriverManager:
             await self._handle_status_response(controller_id, message)
 
         self._hass.async_create_task(_handle())
+
+    def _on_settings_message(self, controller_id: str, message: dict[str, Any]) -> None:
+        """Resolve the single outstanding settings request for a controller."""
+        future = self._settings_waiters.get(controller_id)
+        expected = self._settings_requests.get(controller_id)
+        if expected and message.get("a") != expected[0]:
+            return
+        if expected and message.get("request_id") not in (None, expected[1]):
+            return
+        if future is not None and not future.done():
+            future.set_result(message)
 
     async def _process_led_channel_state(self, controller_id: str, message: dict[str, Any]) -> None:
         self._queue_serial_log(controller_id, direction="rx", payload=message)
@@ -915,6 +945,9 @@ class LedDriverManager:
         return responses
 
     async def async_shutdown(self) -> None:
+        # Do not cancel a worker while flash writes are in progress.
+        if self._update_tasks:
+            await asyncio.gather(*self._update_tasks, return_exceptions=True)
         if self._registry_listener is not None:
             self._registry.async_remove_listener(self._registry_listener)
             self._registry_listener = None
@@ -943,13 +976,252 @@ class LedDriverManager:
             await self.async_close_terminal(session_id)
 
     async def async_set_controller_poll(self, controller_id: str, enabled: bool) -> None:
+        if controller_id in self._maintenance:
+            raise LedDriverError("Controller is reserved for firmware maintenance")
         await self._registry.async_upsert_controller({"id": controller_id, "polling_enabled": enabled})
         controller = next((ctrl for ctrl in self._registry.get_controllers() if ctrl["id"] == controller_id), None)
         if controller is not None:
             self._apply_polling_state(controller_id, controller)
 
+    def get_firmware_update(self, controller_id: str) -> dict[str, Any] | None:
+        """Return a copy of the latest update state suitable for the panel."""
+        update = self._firmware_updates.get(controller_id)
+        return copy.deepcopy(update) if update is not None else None
+
+    def _update_store(self, controller_id: str):
+        suffix = hashlib.sha256(controller_id.encode()).hexdigest()[:24]
+        return Store(self._hass, 1, f"s2j_firmware_{suffix}")
+
+    async def _reserve_controller(self, controller_id: str) -> None:
+        # Check again here: validation/device discovery above may have yielded.
+        if self._maintenance:
+            raise LedDriverError("Another firmware operation is running")
+        self._maintenance.add(controller_id)
+        self._json_helper.blocked.add(controller_id)
+        task = self._poll_tasks.get(controller_id)
+        self._stop_polling(controller_id)
+        if task:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        # Close debug terminals too: both CDC interfaces disappear in DFU.
+        for session in list(self._terminal_helpers):
+            await self.async_close_terminal(session)
+
+    async def _release_controller(self, controller_id: str) -> None:
+        self._maintenance.discard(controller_id)
+        self._json_helper.blocked.discard(controller_id)
+        controller = next((c for c in self._registry.get_controllers() if c["id"] == controller_id), None)
+        if controller:
+            self._apply_polling_state(controller_id, controller)
+
+    async def async_start_firmware_update(self, controller_id: str, package_path: str) -> dict[str, Any]:
+        """Start a guarded USB DFU update in the background."""
+        controller = next((item for item in self._registry.get_controllers() if item.get("id") == controller_id), None)
+        if controller is None:
+            raise LedDriverError(f"Unknown controller {controller_id}")
+        if not controller.get("port"):
+            raise LedDriverError("Controller has no USB serial port configured")
+        existing = self._firmware_updates.get(controller_id)
+        if existing and existing.get("running"):
+            raise LedDriverError("A firmware update is already running for this controller")
+        if self._maintenance:
+            raise LedDriverError("Another firmware operation is running")
+        await asyncio.to_thread(_read_package, package_path)
+        identity = await asyncio.to_thread(identify_device, str(controller["port"]))
+        await self._reserve_controller(controller_id)
+
+        update = {
+            "controller_id": controller_id,
+            "running": True,
+            "phase": "queued",
+            "progress": 0,
+            "message": "Preparing firmware update",
+            "before_settings": None,
+            "after_settings": None,
+            "settings_differ": False,
+            "restore_available": False,
+            "error": None,
+            "package_name": os.path.basename(package_path),
+        }
+        self._firmware_updates[controller_id] = update
+        task = self._hass.async_create_task(self._async_run_firmware_update(copy.deepcopy(controller), package_path, update, identity))
+        self._update_tasks.add(task)
+        task.add_done_callback(self._update_tasks.discard)
+        return self.get_firmware_update(controller_id) or update
+
+    async def async_restore_firmware_settings(self, controller_id: str) -> dict[str, Any]:
+        update = self._firmware_updates.get(controller_id)
+        if not update or not update.get("restore_available"):
+            raise LedDriverError("No differing pre-update settings are available to restore")
+        if self._maintenance:
+            raise LedDriverError("Another firmware operation is running")
+        snapshot = update.get("before_settings")
+        if not isinstance(snapshot, dict):
+            raise LedDriverError("Saved settings backup is invalid")
+        self._set_update_state(update, "restoring_settings", 98, "Restoring saved device settings")
+        await self._reserve_controller(controller_id)
+        update["running"] = True
+        try:
+            reply = await self._async_request_settings(controller_id, "restore", snapshot)
+            if not reply.get("restored") or not reply.get("restarting"):
+                raise LedDriverError("Firmware does not support verified restore and restart")
+            await asyncio.sleep(4)
+            after = await self._wait_settings(controller_id)
+            update["after_settings"] = after
+            if self._normalized_settings(after) != self._normalized_settings(snapshot):
+                raise LedDriverError("Settings still differ after restore and restart")
+            self._set_update_state(update, "complete", 100, "Firmware updated and saved settings restored")
+            update["restore_available"] = False
+            update["settings_differ"] = False
+        except Exception as err:
+            update["running"] = False
+            update["error"] = str(err)
+            update["message"] = f"Settings restore failed: {err}"
+            raise LedDriverError(str(err)) from err
+        finally:
+            update["running"] = False
+            await self._update_store(controller_id).async_save(update)
+            await self._release_controller(controller_id)
+        return self.get_firmware_update(controller_id) or update
+
+    async def _async_request_settings(self, controller_id: str, action: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+        if controller_id in self._settings_waiters:
+            raise LedDriverError("Another settings request is already pending")
+        helper = self._serial_helpers.get(controller_id)
+        if helper is None or not helper.is_connected:
+            raise LedDriverError("Controller serial connection is not available")
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._settings_waiters[controller_id] = future
+        request_id = uuid.uuid4().hex
+        self._settings_requests[controller_id] = (action, request_id)
+        message: dict[str, Any] = {"cm": "settings", "a": action, "request_id": request_id}
+        if data is not None:
+            message["data"] = data
+        try:
+            self._queue_serial_log(controller_id, direction="tx", payload={"cm": "settings", "a": action})
+            await self._json_helper.async_send(controller_id, message, maintenance=True)
+            reply = await asyncio.wait_for(future, timeout=12)
+            if reply.get("t") == "error":
+                raise LedDriverError(reply.get("rs") or "Device rejected settings request")
+            return reply
+        except asyncio.TimeoutError as err:
+            raise LedDriverError("Timed out waiting for device settings response") from err
+        finally:
+            if self._settings_waiters.get(controller_id) is future:
+                self._settings_waiters.pop(controller_id, None)
+                self._settings_requests.pop(controller_id, None)
+
+    @staticmethod
+    def _normalized_settings(snapshot):
+        value = copy.deepcopy(snapshot)
+        drivers = value.get("settings", {}).get("leddrivers")
+        if isinstance(drivers, str):
+            value["settings"]["leddrivers"] = "".join(drivers.split())
+        return value
+
+    async def _wait_settings(self, controller_id):
+        helper = self._serial_helpers[controller_id]
+        error = None
+        for _ in range(8):
+            try:
+                await helper.async_connect()
+                self._json_helper.register_helper(controller_id, helper)
+                reply = await self._async_request_settings(controller_id, "backup")
+                if not isinstance(reply.get("data", {}).get("settings"), dict):
+                    raise LedDriverError("Invalid settings response")
+                return reply["data"]
+            except (SerialHelperError, LedDriverError) as err:
+                error = err
+                await asyncio.sleep(1)
+        raise LedDriverError(f"Controller did not return settings: {error}")
+
+    @staticmethod
+    def _set_update_state(update: dict[str, Any], phase: str, progress: int, message: str) -> None:
+        update["phase"] = phase
+        update["progress"] = max(0, min(100, int(progress)))
+        update["message"] = message
+
+    async def _async_run_firmware_update(self, controller: dict[str, Any], package_path: str, update: dict[str, Any], identity) -> None:
+        controller_id = str(controller["id"])
+        port = str(controller["port"])
+        was_polling = controller_id in self._poll_enabled
+        helper = self._serial_helpers.get(controller_id)
+        try:
+            self._set_update_state(update, "backing_up", 2, "Backing up device settings")
+            backup_reply = await self._async_request_settings(controller_id, "backup")
+            snapshot = backup_reply.get("data")
+            if backup_reply.get("t") == "error" or backup_reply.get("type") == "error" or not isinstance(snapshot, dict):
+                raise LedDriverError(backup_reply.get("r") or backup_reply.get("reason") or "Device did not provide settings backup")
+            update["before_settings"] = snapshot
+            await self._update_store(controller_id).async_save(update)
+
+            self._set_update_state(update, "disconnecting", 4, "Stopping status polling and releasing USB serial")
+            self._stop_polling(controller_id)
+            self._json_helper.unregister_helper(controller_id)
+            if helper is not None:
+                await helper.async_close()
+
+            self._set_update_state(update, "bootloader", 6, "Entering the XIAO USB bootloader")
+            await async_touch_1200(port)
+            dfu_port = await async_wait_for_bootloader_port(identity)
+
+            def _progress(value: int, message: str) -> None:
+                self._set_update_state(update, "flashing", value, message)
+
+            await async_flash(package_path, dfu_port, _progress)
+
+            self._set_update_state(update, "reconnecting", 97, "Waiting for the updated controller")
+            app_port = await async_application_port(identity)
+            if os.path.realpath(port) != os.path.realpath(app_port):
+                helper = SerialHelper(port=app_port, baudrate=controller.get("baudrate", DEFAULT_BAUDRATE))
+                self._serial_helpers[controller_id] = helper
+                await self._registry.async_upsert_controller({"id": controller_id, "port": app_port})
+            await asyncio.sleep(3)
+            if helper is None:
+                raise LedDriverError("Controller serial helper was removed during update")
+            last_error: Exception | None = None
+            for _ in range(20):
+                try:
+                    await helper.async_connect()
+                    self._json_helper.register_helper(controller_id, helper)
+                    break
+                except SerialHelperError as err:
+                    last_error = err
+                    await asyncio.sleep(1)
+            if not helper.is_connected:
+                raise LedDriverError(f"Updated firmware did not reconnect: {last_error}")
+
+            self._set_update_state(update, "verifying_settings", 98, "Comparing settings after firmware update")
+            after = await self._wait_settings(controller_id)
+            update["after_settings"] = after
+            update["settings_differ"] = self._normalized_settings(after) != self._normalized_settings(snapshot)
+            update["restore_available"] = update["settings_differ"]
+            update["running"] = False
+            if update["settings_differ"]:
+                self._set_update_state(update, "settings_differ", 100, "Firmware updated. Device settings differ; review and restore if required.")
+            else:
+                self._set_update_state(update, "complete", 100, "Firmware updated; device settings match the backup")
+        except Exception as err:
+            _LOGGER.exception("Firmware update failed for controller %s", controller_id)
+            update["running"] = False
+            update["phase"] = "failed"
+            update["error"] = str(err)
+            update["message"] = f"Firmware update failed: {err}"
+        finally:
+            if helper is not None and not helper.is_connected:
+                with contextlib.suppress(SerialHelperError):
+                    await helper.async_connect()
+            if helper is not None and helper.is_connected:
+                self._json_helper.register_helper(controller_id, helper)
+            await self._update_store(controller_id).async_save(update)
+            await self._release_controller(controller_id)
+            with contextlib.suppress(OSError):
+                os.unlink(package_path)
+
     async def async_open_terminal(self, controller_id: str) -> tuple[str, SerialHelper]:
         """Open a raw debug terminal session for a controller."""
+        if self._maintenance:
+            raise LedDriverError("Firmware maintenance is in progress")
         controller = next((ctrl for ctrl in self._registry.get_controllers() if ctrl.get("id") == controller_id), None)
         if controller is None:
             raise LedDriverError(f"Unknown controller {controller_id}")
@@ -975,6 +1247,8 @@ class LedDriverManager:
 
     async def async_open_terminal_port(self, port: str, baudrate: int | None = None) -> tuple[str, SerialHelper]:
         """Open a raw debug terminal session for an explicit serial port."""
+        if self._maintenance:
+            raise LedDriverError("Firmware maintenance is in progress")
         port_value = str(port or "").strip()
         if not port_value:
             raise LedDriverError("Serial device address is required")
@@ -1194,6 +1468,8 @@ class LedDriverManager:
             self._hass.bus.async_fire(_OUTPUT_STATE_EVENT, {"outputs": payloads})
 
     def _apply_polling_state(self, controller_id: str, controller: dict[str, Any]) -> None:
+        if controller_id in self._maintenance:
+            return
         if controller.get("polling_enabled"):
             self._start_polling(controller_id)
         else:
