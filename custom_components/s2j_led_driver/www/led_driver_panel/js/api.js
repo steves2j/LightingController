@@ -134,9 +134,10 @@ async function firmwareRequest(method, entryId, controllerId, body) {
   return response.json();
 }
 
-export function uploadControllerFirmware(entryId, controllerId, file) {
+export function uploadControllerFirmware(entryId, controllerId, file, skipBackup = false) {
   const form = new FormData();
   form.append("firmware", file, file.name);
+  if (skipBackup) form.append("skip_backup", "true");
   return firmwareRequest("POST", entryId, controllerId, form);
 }
 

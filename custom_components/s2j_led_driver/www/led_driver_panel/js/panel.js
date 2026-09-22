@@ -70,7 +70,7 @@ import {
   restoreControllerFirmwareSettings,
 } from "./api.js";
 
-const PANEL_VERSION = "6.3";
+const PANEL_VERSION = "6.4";
 // Expose version globally for other pages (e.g., controller_overview)
 if (typeof window !== "undefined") {
   window.LED_DRIVER_PANEL_VERSION = PANEL_VERSION;
@@ -107,6 +107,7 @@ function ensureFirmwareDialog() {
     <progress class="firmware-progress" max="100" value="0"></progress>
     <div class="firmware-percent"></div>
     <button type="button" class="secondary firmware-select">Choose firmware.zip</button>
+    <button type="button" class="secondary firmware-skip-backup" hidden>Continue without backup</button>
     <button type="button" class="secondary firmware-download" hidden>Download settings backup</button>
     <div class="firmware-settings" hidden>
       <p><strong>Device settings changed after the update.</strong> Review the snapshots, then restore the saved settings if appropriate.</p>
@@ -138,6 +139,9 @@ function renderFirmwareUpdate(update) {
   restore.hidden = !Boolean(update.restore_available);
   restore.disabled = Boolean(update.running);
   dialog.querySelector('.firmware-select').disabled = Boolean(update.running);
+  const skip = dialog.querySelector('.firmware-skip-backup');
+  skip.hidden = !update.can_continue_without_backup;
+  skip.disabled = Boolean(update.running);
   const download = dialog.querySelector('.firmware-download');
   download.hidden = !update.before_settings;
   download.onclick = () => {
@@ -175,14 +179,14 @@ async function beginFirmwareUpdate(controllerId) {
   const chooser = document.createElement("input");
   chooser.type = "file";
   chooser.accept = ".zip,application/zip";
-  chooser.addEventListener("change", async () => {
-    const file = chooser.files?.[0];
-    if (!file) return;
+  let selectedFile = null;
+  let skipBackup = false;
+  const upload = async (file, withoutBackup = false) => {
     const dialog = ensureFirmwareDialog();
     if (!dialog.open) dialog.showModal();
     renderFirmwareUpdate({ controller_id: controllerId, running: true, phase: "uploading", progress: 0, message: `Uploading ${file.name}` });
     try {
-      const update = await uploadControllerFirmware(entryId, controllerId, file);
+      const update = await uploadControllerFirmware(entryId, controllerId, file, withoutBackup);
       renderFirmwareUpdate(update);
       if (firmwarePollTimer) clearInterval(firmwarePollTimer);
       firmwarePollTimer = setInterval(async () => {
@@ -198,8 +202,26 @@ async function beginFirmwareUpdate(controllerId) {
     } catch (error) {
       renderFirmwareUpdate({ controller_id: controllerId, phase: "failed", progress: 0, message: error.message || "Firmware upload failed" });
     }
+  };
+  chooser.addEventListener('change', () => {
+    const file = chooser.files?.[0];
+    if (!file) return;
+    selectedFile = file;
+    const withoutBackup = skipBackup;
+    skipBackup = false;
+    upload(file, withoutBackup);
   });
-  dialog.querySelector('.firmware-select').onclick = () => { chooser.value = ''; chooser.click(); };
+  dialog.querySelector('.firmware-select').onclick = () => { skipBackup = false; chooser.value = ''; chooser.click(); };
+  dialog.querySelector('.firmware-skip-backup').onclick = () => {
+    if (!window.confirm('Continue flashing WITHOUT a settings backup? Device settings could be lost. HA will not be able to compare or automatically restore them.')) return;
+    if (selectedFile) {
+      upload(selectedFile, true);
+    } else {
+      skipBackup = true;
+      chooser.value = '';
+      chooser.click();
+    }
+  };
   // Keep this inside the original click gesture (Safari blocks pickers
   // opened after an awaited HTTP request). Cancelling still shows last job.
   renderFirmwareUpdate({controller_id: controllerId, phase: 'idle', message: 'Choose firmware.zip to update this controller'});

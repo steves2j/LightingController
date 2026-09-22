@@ -86,6 +86,12 @@ Only application-only ZIP packages linked for this controller are accepted.
 Packages have CRC integrity checks, not cryptographic signature verification:
 upload only firmware you trust. Firmware upload requires an HA administrator.
 
+If older firmware rejects settings backup with `unknown_command`, the dialog
+offers **Continue without backup**. This requires explicit confirmation and
+retries the selected ZIP without a pre-update snapshot. Settings cannot be
+compared or automatically restored in this mode. After reopening the dialog,
+you may need to select the ZIP again. Other failures do not offer this override.
+
 The HA host/container must have access to the XIAO USB device. The integration
 implements the XIAO's USB serial DFU framing itself, using only its existing
 `pyserial` dependency—no `nrfutil`, `adafruit-nrfutil`, or external updater is

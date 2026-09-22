@@ -1014,7 +1014,7 @@ class LedDriverManager:
         if controller:
             self._apply_polling_state(controller_id, controller)
 
-    async def async_start_firmware_update(self, controller_id: str, package_path: str) -> dict[str, Any]:
+    async def async_start_firmware_update(self, controller_id: str, package_path: str, *, skip_backup: bool = False) -> dict[str, Any]:
         """Start a guarded USB DFU update in the background."""
         controller = next((item for item in self._registry.get_controllers() if item.get("id") == controller_id), None)
         if controller is None:
@@ -1022,12 +1022,16 @@ class LedDriverManager:
         if not controller.get("port"):
             raise LedDriverError("Controller has no USB serial port configured")
         existing = self._firmware_updates.get(controller_id)
+        if skip_backup and not (existing and existing.get("can_continue_without_backup") and not existing.get("running")):
+            raise LedDriverError("Continuing without backup is only available after an unsupported backup command")
         if existing and existing.get("running"):
             raise LedDriverError("A firmware update is already running for this controller")
         if self._maintenance:
             raise LedDriverError("Another firmware operation is running")
         await asyncio.to_thread(_read_package, package_path)
         identity = await asyncio.to_thread(identify_device, str(controller["port"]))
+        if skip_backup and self._firmware_updates.get(controller_id) is not existing:
+            raise LedDriverError("Firmware update state changed; review the latest result")
         await self._reserve_controller(controller_id)
 
         update = {
@@ -1041,6 +1045,8 @@ class LedDriverManager:
             "settings_differ": False,
             "restore_available": False,
             "error": None,
+            "backup_skipped": skip_backup,
+            "can_continue_without_backup": False,
             "package_name": os.path.basename(package_path),
         }
         self._firmware_updates[controller_id] = update
@@ -1147,11 +1153,13 @@ class LedDriverManager:
         was_polling = controller_id in self._poll_enabled
         helper = self._serial_helpers.get(controller_id)
         try:
-            self._set_update_state(update, "backing_up", 2, "Backing up device settings")
-            backup_reply = await self._async_request_settings(controller_id, "backup")
-            snapshot = backup_reply.get("data")
-            if backup_reply.get("t") == "error" or backup_reply.get("type") == "error" or not isinstance(snapshot, dict):
-                raise LedDriverError(backup_reply.get("r") or backup_reply.get("reason") or "Device did not provide settings backup")
+            snapshot = None
+            if not update.get("backup_skipped"):
+                self._set_update_state(update, "backing_up", 2, "Backing up device settings")
+                backup_reply = await self._async_request_settings(controller_id, "backup")
+                snapshot = backup_reply.get("data")
+                if backup_reply.get("t") == "error" or backup_reply.get("type") == "error" or not isinstance(snapshot, dict):
+                    raise LedDriverError(backup_reply.get("r") or backup_reply.get("reason") or "Device did not provide settings backup")
             update["before_settings"] = snapshot
             await self._update_store(controller_id).async_save(update)
 
@@ -1194,15 +1202,18 @@ class LedDriverManager:
             self._set_update_state(update, "verifying_settings", 98, "Comparing settings after firmware update")
             after = await self._wait_settings(controller_id)
             update["after_settings"] = after
-            update["settings_differ"] = self._normalized_settings(after) != self._normalized_settings(snapshot)
+            update["settings_differ"] = snapshot is not None and self._normalized_settings(after) != self._normalized_settings(snapshot)
             update["restore_available"] = update["settings_differ"]
             update["running"] = False
-            if update["settings_differ"]:
+            if update.get("backup_skipped"):
+                self._set_update_state(update, "complete", 100, "Firmware updated WITHOUT a settings backup. Settings preservation was not verified; automatic restore is unavailable.")
+            elif update["settings_differ"]:
                 self._set_update_state(update, "settings_differ", 100, "Firmware updated. Device settings differ; review and restore if required.")
             else:
                 self._set_update_state(update, "complete", 100, "Firmware updated; device settings match the backup")
         except Exception as err:
             _LOGGER.exception("Firmware update failed for controller %s", controller_id)
+            update["can_continue_without_backup"] = update.get("phase") == "backing_up" and str(err) == "unknown_command"
             update["running"] = False
             update["phase"] = "failed"
             update["error"] = str(err)

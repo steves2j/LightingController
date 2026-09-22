@@ -241,7 +241,7 @@ class LedDriverFirmwareView(LedDriverBaseView):
             package_path = handle.name
             manager = self._resolve_entry(entry_id)["manager"]
             try:
-                state = await manager.async_start_firmware_update(controller_id, package_path)
+                state = await manager.async_start_firmware_update(controller_id, package_path, skip_backup=form.get("skip_backup") == "true")
             except (LedDriverError, DfuError) as err:
                 with contextlib.suppress(OSError):
                     os.unlink(package_path)
