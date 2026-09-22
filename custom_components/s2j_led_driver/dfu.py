@@ -193,11 +193,60 @@ def identify_device(port: str) -> UsbIdentity:
     return UsbIdentity(original.serial_number, _location(original), original.device, original.pid)
 
 
+def _matches(port, identity: UsbIdentity) -> bool:
+    return (port.vid == 0x2886 and port.serial_number == identity.serial_number
+            and (not identity.location or _location(port) == identity.location))
+
+
+async def async_identify_device(port: str, previous: UsbIdentity | None = None, timeout: float = 30) -> UsbIdentity:
+    """Wait for enumeration, retaining identity across an application/DFU retry."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if previous is not None:
+            if any(_matches(p, previous) for p in await asyncio.to_thread(list_ports.comports)):
+                return previous
+        else:
+            try:
+                return await asyncio.to_thread(identify_device, port)
+            except DfuError:
+                pass
+        await asyncio.sleep(.5)
+    raise DfuError("Selected XIAO did not enumerate within 30 seconds. Check USB access and the configured port; no other device was selected.")
+
+
+async def async_prepare_bootloader(identity: UsbIdentity, timeout: float = 30) -> str:
+    """Use an already-present DFU interface, or touch the enumerated application."""
+    deadline = time.monotonic() + timeout
+    stable_port = None
+    stable_since = 0.0
+    while time.monotonic() < deadline:
+        candidates = [p for p in await asyncio.to_thread(list_ports.comports) if _matches(p, identity)]
+        if len(candidates) == 1:
+            # Allow a partially enumerated dual-CDC application to settle.
+            if stable_port != candidates[0].device:
+                stable_port, stable_since = candidates[0].device, time.monotonic()
+            elif time.monotonic() - stable_since >= 1.5:
+                return stable_port  # Attempt native DFU, without another reset.
+        else:
+            stable_port = None
+            if len(candidates) == 2:
+                port = sorted((p.device for p in candidates), key=lambda name: [int(s) if s.isdigit() else s for s in re.split(r"(\d+)", name)])[0]
+                try:
+                    await async_touch_1200(port)
+                except DfuError:
+                    # USB can disappear during the touch itself. Enumeration
+                    # and the subsequent DFU handshake determine success.
+                    pass
+                return await async_wait_for_bootloader_port(identity, timeout=timeout)
+        await asyncio.sleep(.25)
+    raise DfuError("Selected XIAO's USB port did not become available for DFU")
+
+
 async def async_application_port(identity: UsbIdentity, timeout: float = 30) -> str:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         candidates = [p for p in await asyncio.to_thread(list_ports.comports)
-                      if p.vid == 0x2886 and p.pid == identity.pid
+                      if p.vid == 0x2886
                       and p.serial_number == identity.serial_number
                       and (not identity.location or _location(p) == identity.location)]
         if len(candidates) == 2:
@@ -207,7 +256,7 @@ async def async_application_port(identity: UsbIdentity, timeout: float = 30) -> 
     raise DfuError("Updated controller's application USB interfaces did not appear")
 
 
-async def async_wait_for_bootloader_port(original_port: UsbIdentity, timeout: float = 15.0) -> str:
+async def async_wait_for_bootloader_port(original_port: UsbIdentity, timeout: float = 30.0) -> str:
     """Locate the re-enumerated XIAO port after the 1200-baud touch."""
     await asyncio.sleep(1.5)
     deadline = time.monotonic() + timeout

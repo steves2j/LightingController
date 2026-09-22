@@ -11,7 +11,7 @@ import uuid
 import hashlib
 from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from time import monotonic
 from typing import Any
 
@@ -22,7 +22,7 @@ from .const import DEFAULT_BAUDRATE
 from .registry import LedRegistry, SSR_ALLOWED_BITS
 from .serial_helper import SerialHelper, SerialHelperError
 from .json_helper import JsonHelper
-from .dfu import DfuError, async_flash, async_touch_1200, async_wait_for_bootloader_port, async_application_port, identify_device, _read_package
+from .dfu import DfuError, UsbIdentity, async_flash, async_prepare_bootloader, async_application_port, async_identify_device, _read_package
 
 ControllerListener = Callable[[dict[str, Any]], None]
 
@@ -1023,13 +1023,14 @@ class LedDriverManager:
             raise LedDriverError("Controller has no USB serial port configured")
         existing = self._firmware_updates.get(controller_id)
         if skip_backup and not (existing and existing.get("can_continue_without_backup") and not existing.get("running")):
-            raise LedDriverError("Continuing without backup is only available after an unsupported backup command")
+            raise LedDriverError("Continuing without backup is only available after a backup failure")
         if existing and existing.get("running"):
             raise LedDriverError("A firmware update is already running for this controller")
         if self._maintenance:
             raise LedDriverError("Another firmware operation is running")
         await asyncio.to_thread(_read_package, package_path)
-        identity = await asyncio.to_thread(identify_device, str(controller["port"]))
+        previous = UsbIdentity(**existing["usb_identity"]) if skip_backup and existing.get("usb_identity") else None
+        identity = await async_identify_device(str(controller["port"]), previous)
         if skip_backup and self._firmware_updates.get(controller_id) is not existing:
             raise LedDriverError("Firmware update state changed; review the latest result")
         await self._reserve_controller(controller_id)
@@ -1046,6 +1047,7 @@ class LedDriverManager:
             "restore_available": False,
             "error": None,
             "backup_skipped": skip_backup,
+            "usb_identity": asdict(identity),
             "can_continue_without_backup": False,
             "package_name": os.path.basename(package_path),
         }
@@ -1169,9 +1171,8 @@ class LedDriverManager:
             if helper is not None:
                 await helper.async_close()
 
-            self._set_update_state(update, "bootloader", 6, "Entering the XIAO USB bootloader")
-            await async_touch_1200(port)
-            dfu_port = await async_wait_for_bootloader_port(identity)
+            self._set_update_state(update, "bootloader", 6, "Waiting for USB enumeration; using DFU mode or entering the bootloader")
+            dfu_port = await async_prepare_bootloader(identity)
 
             def _progress(value: int, message: str) -> None:
                 self._set_update_state(update, "flashing", value, message)
@@ -1213,7 +1214,7 @@ class LedDriverManager:
                 self._set_update_state(update, "complete", 100, "Firmware updated; device settings match the backup")
         except Exception as err:
             _LOGGER.exception("Firmware update failed for controller %s", controller_id)
-            update["can_continue_without_backup"] = update.get("phase") == "backing_up" and str(err) == "unknown_command"
+            update["can_continue_without_backup"] = update.get("phase") == "backing_up"
             update["running"] = False
             update["phase"] = "failed"
             update["error"] = str(err)
@@ -1224,10 +1225,16 @@ class LedDriverManager:
                     await helper.async_connect()
             if helper is not None and helper.is_connected:
                 self._json_helper.register_helper(controller_id, helper)
-            await self._update_store(controller_id).async_save(update)
-            await self._release_controller(controller_id)
-            with contextlib.suppress(OSError):
-                os.unlink(package_path)
+            try:
+                await self._update_store(controller_id).async_save(update)
+            except Exception:
+                # A backup/storage failure must not leave the controller
+                # permanently reserved. Keep the retry state in memory.
+                _LOGGER.exception("Unable to persist firmware update result for %s", controller_id)
+            finally:
+                await self._release_controller(controller_id)
+                with contextlib.suppress(OSError):
+                    os.unlink(package_path)
 
     async def async_open_terminal(self, controller_id: str) -> tuple[str, SerialHelper]:
         """Open a raw debug terminal session for a controller."""

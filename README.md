@@ -86,11 +86,16 @@ Only application-only ZIP packages linked for this controller are accepted.
 Packages have CRC integrity checks, not cryptographic signature verification:
 upload only firmware you trust. Firmware upload requires an HA administrator.
 
-If older firmware rejects settings backup with `unknown_command`, the dialog
+If settings backup fails for any reason (including a timeout or a controller
+already in DFU mode), the dialog
 offers **Continue without backup**. This requires explicit confirmation and
 retries the selected ZIP without a pre-update snapshot. Settings cannot be
 compared or automatically restored in this mode. After reopening the dialog,
-you may need to select the ZIP again. Other failures do not offer this override.
+you may need to select the ZIP again. Failures outside the backup stage do not
+offer this override. The updater attempts DFU directly when a stable single
+USB interface is present; it only requests a reset for the dual-interface
+application. USB enumeration is polled for up to 30 seconds per transition.
+Retries retain the selected device identity even if its port name changes.
 
 The HA host/container must have access to the XIAO USB device. The integration
 implements the XIAO's USB serial DFU framing itself, using only its existing
