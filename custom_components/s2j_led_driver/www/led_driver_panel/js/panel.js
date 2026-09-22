@@ -68,9 +68,10 @@ import {
   uploadControllerFirmware,
   getControllerFirmwareUpdate,
   restoreControllerFirmwareSettings,
+  restoreControllerSettings,
 } from "./api.js";
 
-const PANEL_VERSION = "6.4";
+const PANEL_VERSION = "6.5";
 // Expose version globally for other pages (e.g., controller_overview)
 if (typeof window !== "undefined") {
   window.LED_DRIVER_PANEL_VERSION = PANEL_VERSION;
@@ -94,6 +95,58 @@ function confirmDeletion(message) {
     return true;
   }
   return window.confirm(message);
+}
+
+function openRestoreSettingsDialog(controllerId) {
+  const entryId = state.entryId;
+  const dialog = document.createElement('dialog');
+  dialog.className = 'firmware-dialog';
+  dialog.innerHTML = `
+    <h3>Restore Settings</h3>
+    <p>This replaces the complete device configuration and restarts the controller. Saved LED states may turn outputs on.</p>
+    <label>Load JSON backup <input class="restore-file" type="file" accept=".json,application/json"></label>
+    <label>Or paste a settings backup (or settings restore command)
+      <textarea class="restore-json" rows="14" spellcheck="false" style="width:100%;box-sizing:border-box"></textarea>
+    </label>
+    <p class="restore-result" role="status" aria-live="polite"></p>
+    <button type="button" class="primary restore-submit">Upload and restore</button>
+    <button type="button" class="secondary restore-close">Close</button>`;
+  const input = dialog.querySelector('.restore-file');
+  const text = dialog.querySelector('.restore-json');
+  const result = dialog.querySelector('.restore-result');
+  const submit = dialog.querySelector('.restore-submit');
+  const close = dialog.querySelector('.restore-close');
+  let busy = false;
+  input.onchange = async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    if (file.size > 65536) { result.textContent = 'Backup file is too large (maximum 64 KiB).'; return; }
+    try { text.value = await file.text(); result.textContent = 'Backup loaded. Review it, then click Upload and restore.'; }
+    catch (error) { result.textContent = error.message; }
+  };
+  submit.onclick = async () => {
+    let snapshot;
+    try { snapshot = JSON.parse(text.value); }
+    catch { result.textContent = 'Invalid JSON. Paste or load a complete backup.'; return; }
+    if (!window.confirm('Replace all settings on this controller and restart it? Saved LED states may turn outputs on.')) return;
+    busy = true;
+    submit.disabled = input.disabled = text.disabled = close.disabled = true;
+    result.textContent = 'Restoring settings… Waiting for the controller to restart and verifying settings. This may take up to two minutes.';
+    try {
+      const response = await restoreControllerSettings(entryId, controllerId, snapshot);
+      result.textContent = response.message;
+    } catch (error) {
+      result.textContent = `Restore failed: ${error.message}. If the device restarted, settings may have been applied but verification did not complete.`;
+    } finally {
+      busy = false;
+      submit.disabled = input.disabled = text.disabled = close.disabled = false;
+    }
+  };
+  close.onclick = () => dialog.close();
+  dialog.addEventListener('cancel', event => { if (busy) event.preventDefault(); });
+  dialog.addEventListener('close', () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
 }
 
 function ensureFirmwareDialog() {
@@ -1358,6 +1411,7 @@ let pendingSwitchSelectKey = null;
                 <div class="row-actions">
                   <button class="secondary" data-action="edit-controller" data-key="${key}" data-draft="${isDraft}">Edit</button>
                   <button class="secondary" data-action="update-firmware" data-controller-id="${controller.id}">Upd FW</button>
+                  <button class="secondary" data-action="restore-settings" data-controller-id="${controller.id}">Restore Settings</button>
                   <button class="danger" data-action="delete-controller" data-key="${key}" data-draft="${isDraft}">${
               isDraft ? "Discard" : "Delete"
             }</button>
@@ -2467,6 +2521,12 @@ let pendingSwitchSelectKey = null;
         if (action === "edit-controller") {
           state.editing.controllers.add(key);
           renderControllers();
+          return;
+        }
+
+        if (action === "restore-settings") {
+          const controllerId = button.dataset.controllerId;
+          if (controllerId) openRestoreSettingsDialog(controllerId);
           return;
         }
 

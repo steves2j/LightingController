@@ -9,6 +9,7 @@ import logging
 import os
 import uuid
 import hashlib
+import json
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -1057,8 +1058,15 @@ class LedDriverManager:
         task.add_done_callback(self._update_tasks.discard)
         return self.get_firmware_update(controller_id) or update
 
-    async def async_restore_firmware_settings(self, controller_id: str) -> dict[str, Any]:
-        update = self._firmware_updates.get(controller_id)
+    async def async_restore_firmware_settings(self, controller_id: str, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+        manual = snapshot is not None
+        if manual:
+            snapshot = self._validate_settings_snapshot(snapshot)
+            if not any(c.get("id") == controller_id for c in self._registry.get_controllers()):
+                raise LedDriverError("Unknown controller")
+            update = {"controller_id": controller_id, "before_settings": snapshot, "restore_available": True}
+        else:
+            update = self._firmware_updates.get(controller_id)
         if not update or not update.get("restore_available"):
             raise LedDriverError("No differing pre-update settings are available to restore")
         if self._maintenance:
@@ -1078,7 +1086,7 @@ class LedDriverManager:
             update["after_settings"] = after
             if self._normalized_settings(after) != self._normalized_settings(snapshot):
                 raise LedDriverError("Settings still differ after restore and restart")
-            self._set_update_state(update, "complete", 100, "Firmware updated and saved settings restored")
+            self._set_update_state(update, "complete", 100, "Settings restored and verified after restart" if manual else "Firmware updated and saved settings restored")
             update["restore_available"] = False
             update["settings_differ"] = False
         except Exception as err:
@@ -1088,9 +1096,26 @@ class LedDriverManager:
             raise LedDriverError(str(err)) from err
         finally:
             update["running"] = False
-            await self._update_store(controller_id).async_save(update)
-            await self._release_controller(controller_id)
-        return self.get_firmware_update(controller_id) or update
+            try:
+                if not manual:
+                    await self._update_store(controller_id).async_save(update)
+            finally:
+                await self._release_controller(controller_id)
+        return copy.deepcopy(update)
+
+    @staticmethod
+    def _validate_settings_snapshot(snapshot):
+        # Accept either a raw backup or the serial restore envelope.
+        if isinstance(snapshot, dict) and snapshot.get("cm") == "settings" and snapshot.get("a") == "restore":
+            snapshot = snapshot.get("data")
+        if (not isinstance(snapshot, dict) or type(snapshot.get("version")) is not int
+                or not isinstance(snapshot.get("settings"), dict) or not snapshot["settings"]
+                or not isinstance(snapshot["settings"].get("leddrivers"), str)):
+            raise LedDriverError("Expected a complete backup with version and settings (including leddrivers)")
+        message = {"cm": "settings", "a": "restore", "request_id": "0" * 32, "data": snapshot}
+        if len(json.dumps(message).encode("utf-8")) >= 4096:
+            raise LedDriverError("Settings exceed the device's 4095-byte command limit")
+        return copy.deepcopy(snapshot)
 
     async def _async_request_settings(self, controller_id: str, action: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
         if controller_id in self._settings_waiters:

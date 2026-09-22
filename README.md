@@ -70,6 +70,16 @@ views:
 
 ## USB firmware updates
 
+The controller's **Restore Settings** action restores a backup independently
+of firmware updates. Load a JSON file or paste the complete backup into the
+dialog, then choose **Upload and restore** and confirm. Raw `version`/`settings`
+backups and `cm: settings, a: restore, data: ...` command envelopes are accepted.
+This uses the main serial connection inside HA, including on HAOS; no external
+terminal is needed. Polling pauses during restore and resumes afterward.
+Success requires a restart and matching settings readback. It replaces the
+whole device configuration and may enable saved LED outputs. Administrator
+access and firmware supporting settings restore are required.
+
 Each saved controller has an **Upd FW** action. Select the PlatformIO-generated
 `firmware.zip` (not `firmware.bin`); the integration backs up device settings,
 releases the controller serial port, enters the XIAO bootloader with the

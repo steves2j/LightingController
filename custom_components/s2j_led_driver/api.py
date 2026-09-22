@@ -249,11 +249,16 @@ class LedDriverFirmwareView(LedDriverBaseView):
             return web.json_response(state)
 
         payload = await request.json()
-        if payload.get("action") != "restore_settings":
+        if payload.get("action") not in ("restore_settings", "restore_manual_settings"):
             raise web.HTTPBadRequest(text="Unsupported firmware action")
         manager = self._resolve_entry(entry_id)["manager"]
         try:
-            state = await manager.async_restore_firmware_settings(controller_id)
+            if payload.get("action") == "restore_manual_settings":
+                if not isinstance(payload.get("snapshot"), dict):
+                    raise LedDriverError("A JSON settings backup is required")
+                state = await manager.async_restore_firmware_settings(controller_id, payload["snapshot"])
+            else:
+                state = await manager.async_restore_firmware_settings(controller_id)
         except LedDriverError as err:
             raise web.HTTPBadRequest(text=str(err)) from err
         return web.json_response(state)
