@@ -69,9 +69,10 @@ import {
   getControllerFirmwareUpdate,
   restoreControllerFirmwareSettings,
   restoreControllerSettings,
+  clearControllerFirmwareMaintenance,
 } from "./api.js";
 
-const PANEL_VERSION = "6.5";
+const PANEL_VERSION = "6.6";
 // Expose version globally for other pages (e.g., controller_overview)
 if (typeof window !== "undefined") {
   window.LED_DRIVER_PANEL_VERSION = PANEL_VERSION;
@@ -159,8 +160,10 @@ function ensureFirmwareDialog() {
     <p class="firmware-message"></p>
     <progress class="firmware-progress" max="100" value="0"></progress>
     <div class="firmware-percent"></div>
+    <label class="firmware-skip-option"><input type="checkbox" class="firmware-skip-backup-choice"> Skip settings backup and flash immediately</label>
     <button type="button" class="secondary firmware-select">Choose firmware.zip</button>
     <button type="button" class="secondary firmware-skip-backup" hidden>Continue without backup</button>
+    <button type="button" class="secondary firmware-clear-lock">Force clear update lock</button>
     <button type="button" class="secondary firmware-download" hidden>Download settings backup</button>
     <div class="firmware-settings" hidden>
       <p><strong>Device settings changed after the update.</strong> Review the snapshots, then restore the saved settings if appropriate.</p>
@@ -192,6 +195,17 @@ function renderFirmwareUpdate(update) {
   restore.hidden = !Boolean(update.restore_available);
   restore.disabled = Boolean(update.running);
   dialog.querySelector('.firmware-select').disabled = Boolean(update.running);
+  dialog.querySelector('.firmware-skip-backup-choice').disabled = Boolean(update.running);
+  const clearLock = dialog.querySelector('.firmware-clear-lock');
+  clearLock.disabled = false;
+  clearLock.onclick = async () => {
+    try {
+      const cleared = await clearControllerFirmwareMaintenance(dialog.dataset.entryId, update.controller_id || dialog.dataset.controllerId);
+      renderFirmwareUpdate(cleared);
+    } catch (error) {
+      dialog.querySelector('.firmware-message').textContent = error.message || 'Unable to clear firmware update lock';
+    }
+  };
   const skip = dialog.querySelector('.firmware-skip-backup');
   skip.hidden = !update.can_continue_without_backup;
   skip.disabled = Boolean(update.running);
@@ -218,6 +232,7 @@ async function beginFirmwareUpdate(controllerId) {
   const entryId = state.entryId;
   const dialog = ensureFirmwareDialog();
   dialog.dataset.entryId = entryId;
+  dialog.dataset.controllerId = controllerId;
   if (!dialog.open) dialog.showModal();
   const poll = () => {
     if (firmwarePollTimer) clearInterval(firmwarePollTimer);
@@ -260,7 +275,7 @@ async function beginFirmwareUpdate(controllerId) {
     const file = chooser.files?.[0];
     if (!file) return;
     selectedFile = file;
-    const withoutBackup = skipBackup;
+    const withoutBackup = skipBackup || dialog.querySelector('.firmware-skip-backup-choice').checked;
     skipBackup = false;
     upload(file, withoutBackup);
   });
@@ -275,13 +290,11 @@ async function beginFirmwareUpdate(controllerId) {
       chooser.click();
     }
   };
-  // Keep this inside the original click gesture (Safari blocks pickers
-  // opened after an awaited HTTP request). Cancelling still shows last job.
+  // The chooser is intentionally user-initiated so the operator can select
+  // "Skip settings backup" before selecting a package.
   renderFirmwareUpdate({controller_id: controllerId, phase: 'idle', message: 'Choose firmware.zip to update this controller'});
-  chooser.click();
   try {
     const existing = await getControllerFirmwareUpdate(entryId, controllerId);
-    if (chooser.files?.length) return;
     renderFirmwareUpdate(existing);
     if (existing.running) { poll(); return; }
   } catch (error) { dialog.querySelector('.firmware-message').textContent=error.message; }

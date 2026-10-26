@@ -153,6 +153,10 @@ export function restoreControllerSettings(entryId, controllerId, snapshot) {
   return firmwareRequest("POST", entryId, controllerId, JSON.stringify({action: "restore_manual_settings", snapshot}));
 }
 
+export function clearControllerFirmwareMaintenance(entryId, controllerId) {
+  return firmwareRequest("POST", entryId, controllerId, JSON.stringify({action: "clear_maintenance"}));
+}
+
 export function setLedOutputTargets(entryId, targets) {
   if (!entryId) {
     return Promise.reject(new Error("Select an integration entry before updating LEDs."));

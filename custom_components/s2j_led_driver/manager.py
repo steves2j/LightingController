@@ -125,6 +125,7 @@ class LedDriverManager:
         self._settings_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._maintenance: set[str] = set()
         self._update_tasks: set[asyncio.Task] = set()
+        self._firmware_tasks: dict[str, asyncio.Task] = {}
         self._settings_requests: dict[str, tuple[str, str]] = {}
 
     async def async_initialize(self) -> None:
@@ -1023,17 +1024,13 @@ class LedDriverManager:
         if not controller.get("port"):
             raise LedDriverError("Controller has no USB serial port configured")
         existing = self._firmware_updates.get(controller_id)
-        if skip_backup and not (existing and existing.get("can_continue_without_backup") and not existing.get("running")):
-            raise LedDriverError("Continuing without backup is only available after a backup failure")
         if existing and existing.get("running"):
             raise LedDriverError("A firmware update is already running for this controller")
         if self._maintenance:
             raise LedDriverError("Another firmware operation is running")
         await asyncio.to_thread(_read_package, package_path)
-        previous = UsbIdentity(**existing["usb_identity"]) if skip_backup and existing.get("usb_identity") else None
+        previous = UsbIdentity(**existing["usb_identity"]) if skip_backup and existing and existing.get("usb_identity") else None
         identity = await async_identify_device(str(controller["port"]), previous)
-        if skip_backup and self._firmware_updates.get(controller_id) is not existing:
-            raise LedDriverError("Firmware update state changed; review the latest result")
         await self._reserve_controller(controller_id)
 
         update = {
@@ -1055,7 +1052,35 @@ class LedDriverManager:
         self._firmware_updates[controller_id] = update
         task = self._hass.async_create_task(self._async_run_firmware_update(copy.deepcopy(controller), package_path, update, identity))
         self._update_tasks.add(task)
-        task.add_done_callback(self._update_tasks.discard)
+        self._firmware_tasks[controller_id] = task
+        def _finished(completed: asyncio.Task) -> None:
+            self._update_tasks.discard(completed)
+            if self._firmware_tasks.get(controller_id) is completed:
+                self._firmware_tasks.pop(controller_id, None)
+        task.add_done_callback(_finished)
+        return self.get_firmware_update(controller_id) or update
+
+    async def async_force_clear_firmware_maintenance(self, controller_id: str) -> dict[str, Any]:
+        """Recover a controller left reserved after an update task has ended."""
+        if not any(c.get("id") == controller_id for c in self._registry.get_controllers()):
+            raise LedDriverError("Unknown controller")
+        task = self._firmware_tasks.get(controller_id)
+        if task is not None and not task.done():
+            raise LedDriverError("A firmware update is still active; it cannot be force-cleared")
+        waiter = self._settings_waiters.pop(controller_id, None)
+        self._settings_requests.pop(controller_id, None)
+        if waiter is not None and not waiter.done():
+            waiter.cancel()
+        update = self._firmware_updates.get(controller_id)
+        if update is None:
+            update = {"controller_id": controller_id}
+            self._firmware_updates[controller_id] = update
+        update.update(running=False, phase="cleared", progress=0,
+                      message="Firmware maintenance lock cleared; serial connections restored",
+                      error=None, can_continue_without_backup=False)
+        await self._release_controller(controller_id)
+        await self._sync_clients()
+        await self._update_store(controller_id).async_save(update)
         return self.get_firmware_update(controller_id) or update
 
     async def async_restore_firmware_settings(self, controller_id: str, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
